@@ -1,0 +1,20 @@
+name = "CNLPModels"
+uuid = "e8ddee8d-ce21-405b-9ec9-45cea2c1b284"
+authors = ["Sungho Shin <sushin@mit.edu>"]
+version = "0.1.0"
+
+[deps]
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+NLPModels = "a4795742-8479-5a88-8948-cc11e1c8c1a6"
+
+[compat]
+NLPModels = "0.21"
+julia = "1.10"
+
+[extras]
+MadNLP = "2621e9c9-9eb4-46b1-8089-e8c72242dfb6"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["MadNLP", "Test"]
