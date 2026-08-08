@@ -58,8 +58,8 @@ module CNLPModels
 
 using Libdl
 using LinearAlgebra
-using NLPModels
-import NLPModels: increment!, @lencheck
+import NLPModels: NLPModels, AbstractNLPModel, NLPModelMeta, Counters,
+    increment!, @lencheck
 
 export CNLPModel, restore_blas!, schema_json, set_path!, @lib, @cnlp_str
 
