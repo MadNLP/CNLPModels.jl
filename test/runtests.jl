@@ -93,16 +93,13 @@ end
     @test CNLPModels.lib("toyqp") === l          # cached by name
     m = CNLPModel("toyqp"; prefix = "tq", args = 4) # name-based construction
     @test m.meta.nvar == 4
-    l2 = @lib toyqp                              # macro shortcut
-    @test l2 === l
+    @test cnlp"toyqp" === l                      # the string-literal shortcut
     @test_throws ErrorException CNLPModels.lib("nonexistent")
 end
 
-@testset "@lib call form constructs models" begin
-    m = @lib toyqp(prefix = "tq", args = 5)
-    @test m.meta.nvar == 5
-end
-
-@testset "cnlp string literal" begin
+@testset "cnlp literal is the shortcut" begin
     @test cnlp"toyqp" === CNLPModels.lib("toyqp")
+    m = CNLPModel(cnlp"toyqp"; prefix = "tq", args = 5)   # directly as the lib argument
+    @test m.meta.nvar == 5
+    @test_throws ErrorException cnlp"nonexistent"
 end

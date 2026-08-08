@@ -18,8 +18,15 @@ m = CNLPModel("mymodel"; args = 1000)      # resolves libmymodel.so, instance of
 res = ipopt(m)
 ```
 
-Shortcuts: `@lib mymodel` (handle), `@lib mymodel(args = 1000)` (model),
-`cnlp"mymodel"` (handle), or explicit `CNLPModels.load("/path/libmymodel.so")`.
+The `cnlp"..."` literal is the shortcut onto the path — it resolves the
+name, checks that the library exists and loads, and hands back the cached
+handle, directly usable as the library argument:
+
+```julia
+m = CNLPModel(cnlp"mymodel"; args = 1000)
+```
+
+(Or bypass the path entirely with `CNLPModels.load("/path/libmymodel.so")`.)
 Any number of model instances may coexist per library.
 
 ## The C ABI
