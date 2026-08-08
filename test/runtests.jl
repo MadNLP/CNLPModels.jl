@@ -15,10 +15,10 @@ run(`$cc -shared -fPIC -O2 -o $LIBPATH $(joinpath(FIXDIR, "tinyqp.c"))`)
     lib = CNLPModels.load(LIBPATH)
 
     @testset "init failure surfaces" begin
-        @test_throws ErrorException CNLPModel(lib; prefix = "tq", n = 1)
+        @test_throws ErrorException CNLPModel(lib; prefix = "tq", args = 1)
     end
 
-    m = CNLPModel(lib; prefix = "tq", n = 4)
+    m = CNLPModel(lib; prefix = "tq", args = 4)
 
     @testset "meta" begin
         @test m.meta.nvar == 4
@@ -68,7 +68,7 @@ run(`$cc -shared -fPIC -O2 -o $LIBPATH $(joinpath(FIXDIR, "tinyqp.c"))`)
     @testset "multiple coexisting instances" begin
         x = [0.5, 0.25, 2.0, -1.0]
         o_before = obj(m, x)
-        m6 = CNLPModel(lib; prefix = "tq", n = 6)
+        m6 = CNLPModel(lib; prefix = "tq", args = 6)
         @test m6.meta.nvar == 6
         # Creating a second instance must not disturb the first (this was the
         # single-slot silent-corruption hazard of the pre-handle ABI).
@@ -91,7 +91,7 @@ end
     l = CNLPModels.lib("toyqp")
     @test l isa CNLPModels.CLib
     @test CNLPModels.lib("toyqp") === l          # cached by name
-    m = CNLPModel("toyqp"; prefix = "tq", n = 4) # name-based construction
+    m = CNLPModel("toyqp"; prefix = "tq", args = 4) # name-based construction
     @test m.meta.nvar == 4
     l2 = @lib toyqp                              # macro shortcut
     @test l2 === l
@@ -99,7 +99,7 @@ end
 end
 
 @testset "@lib call form constructs models" begin
-    m = @lib toyqp(prefix = "tq", n = 5)
+    m = @lib toyqp(prefix = "tq", args = 5)
     @test m.meta.nvar == 5
 end
 

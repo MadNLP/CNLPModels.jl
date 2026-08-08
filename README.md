@@ -14,11 +14,11 @@ using CNLPModels, NLPModelsIpopt
 
 CNLPModels.set_path!("/opt/models")        # or the CNLPMODELS_PATH env variable
 
-m = CNLPModel("mymodel"; n = 1000)         # resolves libmymodel.so, instance of size n
+m = CNLPModel("mymodel"; args = 1000)      # resolves libmymodel.so, instance of size 1000
 res = ipopt(m)
 ```
 
-Shortcuts: `@lib mymodel` (handle), `@lib mymodel(n = 1000)` (model),
+Shortcuts: `@lib mymodel` (handle), `@lib mymodel(args = 1000)` (model),
 `cnlp"mymodel"` (handle), or explicit `CNLPModels.load("/path/libmymodel.so")`.
 Any number of model instances may coexist per library.
 
@@ -96,7 +96,7 @@ Tables cross the boundary **as columns** of equal length; the library
 reassembles rows internally. From Julia this is transparent:
 
 ```julia
-m = CNLPModel("mymodel"; data = (;
+m = CNLPModel("mymodel"; args = (;
     bus  = [(i = 1, pd = 0.4), (i = 2, pd = 0.3)],   # a table
     vmin = [0.9, 0.9],                                # an array
     base = 100.0,                                     # a scalar

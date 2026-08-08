@@ -137,8 +137,8 @@ end
 The `@`-shortcut onto the library path: the bare form resolves and caches the
 handle (`@lib acopf`), and the call form constructs the model —
 
-    m = @lib acopf(data = data14)      # ≡ CNLPModel("acopf"; data = data14)
-    m = @lib lv(n = 1000)              # ≡ CNLPModel("lv"; n = 1000)
+    m = @lib acopf(args = grid)        # ≡ CNLPModel("acopf"; args = grid)
+    m = @lib lv(args = 1000)           # ≡ CNLPModel("lv"; args = 1000)
 """
 macro lib(ex)
     if ex isa Symbol
@@ -274,34 +274,32 @@ function _fill_data(lib::CLib, prefix::AbstractString, data::NamedTuple)
 end
 
 """
-    CNLPModel(lib::CLib; n, prefix = "rec", name = basename(lib.path))
-    CNLPModel(lib::CLib; data::NamedTuple, prefix = "rec", name = ...)
+    CNLPModel(lib::CLib; args, prefix = "rec", name = basename(lib.path))
 
-Create a model instance from `lib` and wrap it as an `AbstractNLPModel` —
-either at size `n` (`<prefix>_new(n)`, simple libraries) or from structured
-`data` (ABI v2 builder: numbers, numeric vectors, and vectors of named
-tuples, sent columnar). Any number of instances may coexist per library.
-The first library call lazily finishes its runtime initialization, after
-which the host's BLAS forwarding is restored — see [`restore_blas!`](@ref).
+Create a model instance from `lib` and wrap it as an `AbstractNLPModel`.
+`args` is what instantiates the model: an **integer** for simple libraries
+(`<prefix>_new(n)` — one size knob), or a **named tuple** for structured
+libraries (ABI v2 builder: numbers, numeric vectors, and vectors of named
+tuples, sent columnar and validated against the library's schema). Any
+number of instances may coexist per library. The first library call lazily
+finishes its runtime initialization, after which the host's BLAS forwarding
+is restored — see [`restore_blas!`](@ref).
 """
 function CNLPModel(
     lib::CLib;
-    n::Union{Nothing, Integer} = nothing,
-    data::Union{Nothing, NamedTuple} = nothing,
+    args::Union{Integer, NamedTuple},
     prefix::AbstractString = "rec",
     name::AbstractString = basename(lib.path),
 )
     sym(s) = Symbol(prefix, "_", s)
     fp(s) = Libdl.dlsym(lib.handle, sym(s))
 
-    (n === nothing) == (data === nothing) &&
-        throw(ArgumentError("pass exactly one of n= (simple) or data= (structured)"))
-    id = if n !== nothing
-        i = ccall(fp(:new), Cint, (Cint,), Cint(n))
+    id = if args isa Integer
+        i = ccall(fp(:new), Cint, (Cint,), Cint(args))
         i > 0 || _status_error(sym(:new), i)
         i
     else
-        _fill_data(lib, prefix, data)
+        _fill_data(lib, prefix, args)
     end
     # The library's runtime is fully initialized by now: repair whatever its
     # lazy initialization did to the shared trampoline.
@@ -342,7 +340,7 @@ Name-based construction: resolve the library via [`lib`](@ref) and default
 the symbol prefix to `name` (override with `prefix=`).
 
     set_path!("/opt/models")
-    m = CNLPModel("acopf"; data = data14)
+    m = CNLPModel("acopf"; args = grid)
 """
 CNLPModel(name::AbstractString; prefix::AbstractString = name, kwargs...) =
     CNLPModel(lib(name); prefix = prefix, kwargs...)
