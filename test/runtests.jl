@@ -82,3 +82,18 @@ run(`$cc -shared -fPIC -O2 -o $LIBPATH $(joinpath(FIXDIR, "tinyqp.c"))`)
         @test res4.objective ≈ 0.5 rtol = 1e-6
     end
 end
+
+@testset "library path registry" begin
+    # a second copy under a models dir, named like a registered model
+    mdir = mktempdir()
+    cp(LIBPATH, joinpath(mdir, "libtoyqp.so"))
+    CNLPModels.set_path!(mdir)
+    l = CNLPModels.lib("toyqp")
+    @test l isa CNLPModels.CLib
+    @test CNLPModels.lib("toyqp") === l          # cached by name
+    m = CNLPModel("toyqp"; prefix = "tq", n = 4) # name-based construction
+    @test m.meta.nvar == 4
+    l2 = @lib toyqp                              # macro shortcut
+    @test l2 === l
+    @test_throws ErrorException CNLPModels.lib("nonexistent")
+end

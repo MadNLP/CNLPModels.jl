@@ -61,7 +61,7 @@ using LinearAlgebra
 using NLPModels
 import NLPModels: increment!, @lencheck
 
-export CNLPModel, restore_blas!, schema_json
+export CNLPModel, restore_blas!, schema_json, set_path!, @lib
 
 """
     CLib
@@ -74,6 +74,60 @@ struct CLib
     path::String
     handle::Ptr{Cvoid}
     blas_libs::Vector{String}
+end
+
+# ── library path registry ────────────────────────────────────────────────────
+
+const _PATHS = String[]
+const _LIBS = Dict{String, CLib}()
+
+"""
+    set_path!(dirs...)
+
+Set the library search path used by name-based loading (`CNLPModels.lib("acopf")`,
+`CNLPModel("acopf"; ...)`, `@lib acopf`). Initialized from the colon-separated
+`CNLPMODELS_PATH` environment variable; calling `set_path!` replaces it.
+"""
+function set_path!(dirs::AbstractString...)
+    empty!(_PATHS)
+    append!(_PATHS, String.(dirs))
+    return copy(_PATHS)
+end
+
+function _paths()
+    if isempty(_PATHS)
+        env = get(ENV, "CNLPMODELS_PATH", "")
+        isempty(env) || append!(_PATHS, split(env, ":"))
+    end
+    return _PATHS
+end
+
+"""
+    lib(name::AbstractString) -> CLib
+
+Resolve `lib<name>.<dlext>` against the search path ([`set_path!`](@ref) /
+`CNLPMODELS_PATH`) — also accepting `<dir>/lib/lib<name>.<dlext>`, the layout
+`compile_library` produces — load it, and cache the handle by name.
+"""
+function lib(name::AbstractString)
+    get!(_LIBS, String(name)) do
+        fname = "lib" * name * "." * Libdl.dlext
+        for d in _paths(), cand in (joinpath(d, fname), joinpath(d, name, "lib", fname), joinpath(d, "lib", fname))
+            isfile(cand) && return load(cand)
+        end
+        error("library $fname not found on the CNLPModels path " *
+              "($(isempty(_paths()) ? "empty — call set_path! or set CNLPMODELS_PATH" : join(_paths(), ':')))")
+    end
+end
+
+"""
+    @lib name
+
+Shortcut for `CNLPModels.lib("name")`: `@lib acopf` resolves and caches
+`libacopf` from the search path.
+"""
+macro lib(name)
+    return :(lib($(string(name))))
 end
 
 """
@@ -258,6 +312,18 @@ function CNLPModel(
     NLPModels.jac_structure!(m, m.jrows, m.jcols)
     return m
 end
+
+"""
+    CNLPModel(name::AbstractString; kwargs...)
+
+Name-based construction: resolve the library via [`lib`](@ref) and default
+the symbol prefix to `name` (override with `prefix=`).
+
+    set_path!("/opt/models")
+    m = CNLPModel("acopf"; data = data14)
+"""
+CNLPModel(name::AbstractString; prefix::AbstractString = name, kwargs...) =
+    CNLPModel(lib(name); prefix = prefix, kwargs...)
 
 function NLPModels.obj(m::CNLPModel, x::AbstractVector{Float64})
     @lencheck m.meta.nvar x
