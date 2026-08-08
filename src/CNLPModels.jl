@@ -4,7 +4,7 @@
 Consume an NLP exposed by a shared library through a plain C interface as an
 `NLPModels.AbstractNLPModel`, so any NLPModels-compatible solver (MadNLP,
 Ipopt, ...) can solve it. The main producer of such libraries is ExaModels'
-recorder (`record`/`replay`) AOT-compiled with `juliac --output-lib`, but any
+tape recorder (`compile_library`), but any
 library implementing the ABI below works, in any language.
 
 # C ABI convention
