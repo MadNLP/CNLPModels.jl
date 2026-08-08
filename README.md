@@ -14,7 +14,7 @@ language — `test/fixtures/tinyqp.c` is a complete reference implementation in
 using CNLPModels, MadNLP
 
 lib = CNLPModels.load("librecorder.so")          # snapshots host BLAS, dlopens
-m = CNLPModel(lib; prefix = "rec", n = 1000)     # rec_init(1000) + BLAS restore
+m = CNLPModel(lib; prefix = "rec", n = 1000)     # rec_new(1000) → id, BLAS restore
 res = madnlp(m)
 ```
 
