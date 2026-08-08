@@ -205,51 +205,107 @@ function schema_json(lib::CLib; prefix::AbstractString = "rec")
     return String(buf)
 end
 
-# Fill a builder from a NamedTuple: numbers are scalars, numeric vectors are
-# arrays, vectors of named tuples are tables (sent column-by-column). The
+# Top-level field names from the schema JSON, in declaration order. The
+# schema is this package's own contract (see the README), so a structural
+# scan suffices: field objects sit at bracket depth 2 inside "fields"
+# (table columns at depth 4 are thereby excluded).
+function _schema_field_names(json::AbstractString)
+    names = String[]
+    r = findfirst("\"fields\"", json)
+    r === nothing && error("library schema has no \"fields\" array")
+    depth = 0
+    i = last(r)
+    while i < lastindex(json)
+        i = nextind(json, i)
+        ch = json[i]
+        if ch == '[' || ch == '{'
+            depth += 1
+        elseif ch == ']' || ch == '}'
+            depth -= 1
+            depth <= 0 && break
+        elseif ch == '"'
+            j = findnext('"', json, nextind(json, i))
+            tok = json[nextind(json, i):prevind(json, j)]
+            if depth == 2 && tok == "name"
+                k1 = findnext('"', json, nextind(json, j))
+                k2 = findnext('"', json, nextind(json, k1))
+                push!(names, json[nextind(json, k1):prevind(json, k2)])
+                i = k2
+            else
+                i = j
+            end
+        end
+    end
+    return names
+end
+
+# ── Instantiation: `args` → model id, by dispatch ────────────────────────────
+# `args` has no privileged shape. An Integer, a plain Tuple, and a NamedTuple
+# all instantiate through the same machinery: integers use the one-knob
+# `<prefix>_new(n)` when the library exports it and fall through to the
+# builder as a 1-tuple otherwise; plain tuples bind positionally to the
+# schema's field order; named tuples bind by name. Anything else is a
+# MethodError by construction.
+
+function _instantiate(lib::CLib, prefix::AbstractString, n::Integer)
+    p = Libdl.dlsym(lib.handle, Symbol(prefix, "_new"); throw_error = false)
+    p === nothing && return _instantiate(lib, prefix, (n,))
+    id = ccall(p, Cint, (Cint,), Cint(n))
+    id > 0 || _status_error(Symbol(prefix, "_new"), id)
+    return id
+end
+
+function _instantiate(lib::CLib, prefix::AbstractString, args::Tuple)
+    names = _schema_field_names(schema_json(lib; prefix = prefix))
+    length(names) == length(args) || error(
+        "positional args have $(length(args)) entries but the library's schema " *
+        "declares $(length(names)) fields: " * join(names, ", "))
+    return _instantiate(lib, prefix, NamedTuple{Tuple(Symbol.(names))}(args))
+end
+
+_instantiate(lib::CLib, prefix::AbstractString, data::NamedTuple) =
+    _fill_data(lib, prefix, data)
+
+# One builder field, by value dispatch: numbers are scalars, numeric vectors
+# are arrays, vectors of named tuples are tables (sent column-by-column). The
 # library itself validates names, kinds, completeness and column lengths.
+_push_field(fp, sym, b, f, val::AbstractFloat) =
+    _check(ccall(fp(:set_scalar_f64), Cint, (Cint, Cstring, Cdouble),
+        b, f, Cdouble(val)), sym(:set_scalar_f64))
+_push_field(fp, sym, b, f, val::Integer) =
+    _check(ccall(fp(:set_scalar_i64), Cint, (Cint, Cstring, Clonglong),
+        b, f, Clonglong(val)), sym(:set_scalar_i64))
+_push_field(fp, sym, b, f, val::AbstractVector{<:AbstractFloat}) =
+    _check(ccall(fp(:set_array_f64), Cint, (Cint, Cstring, Ptr{Cdouble}, Cint),
+        b, f, convert(Vector{Float64}, val), Cint(length(val))), sym(:set_array_f64))
+_push_field(fp, sym, b, f, val::AbstractVector{<:Integer}) =
+    _check(ccall(fp(:set_array_i64), Cint, (Cint, Cstring, Ptr{Clonglong}, Cint),
+        b, f, convert(Vector{Int64}, val), Cint(length(val))), sym(:set_array_i64))
+function _push_field(fp, sym, b, f, val::AbstractVector{<:NamedTuple})
+    for cn in fieldnames(eltype(val))
+        _push_col(fp, sym, b, f, string(cn), [getfield(r, cn) for r in val])
+    end
+end
+_push_field(fp, sym, b, f, val) =
+    error("unsupported field $f::$(typeof(val)): fields must be numbers, " *
+          "numeric vectors, or vectors of named tuples of numbers")
+
+_push_col(fp, sym, b, f, c, col::AbstractVector{<:AbstractFloat}) =
+    _check(ccall(fp(:set_col_f64), Cint, (Cint, Cstring, Cstring, Ptr{Cdouble}, Cint),
+        b, f, c, convert(Vector{Float64}, col), Cint(length(col))), sym(:set_col_f64))
+_push_col(fp, sym, b, f, c, col::AbstractVector{<:Integer}) =
+    _check(ccall(fp(:set_col_i64), Cint, (Cint, Cstring, Cstring, Ptr{Clonglong}, Cint),
+        b, f, c, convert(Vector{Int64}, col), Cint(length(col))), sym(:set_col_i64))
+_push_col(fp, sym, b, f, c, col) =
+    error("unsupported column type $(eltype(col)) for $f.$c")
+
 function _fill_data(lib::CLib, prefix::AbstractString, data::NamedTuple)
     sym(s) = Symbol(prefix, "_", s)
     fp(s) = Libdl.dlsym(lib.handle, sym(s))
     b = ccall(fp(:data_begin), Cint, ())
     b > 0 || _status_error(sym(:data_begin), b)
     for (fname, val) in pairs(data)
-        f = string(fname)
-        if val isa AbstractFloat
-            _check(ccall(fp(:set_scalar_f64), Cint, (Cint, Cstring, Cdouble),
-                b, f, Cdouble(val)), sym(:set_scalar_f64))
-        elseif val isa Integer
-            _check(ccall(fp(:set_scalar_i64), Cint, (Cint, Cstring, Clonglong),
-                b, f, Clonglong(val)), sym(:set_scalar_i64))
-        elseif val isa AbstractVector && eltype(val) <: AbstractFloat
-            v = convert(Vector{Float64}, val)
-            _check(ccall(fp(:set_array_f64), Cint, (Cint, Cstring, Ptr{Cdouble}, Cint),
-                b, f, v, Cint(length(v))), sym(:set_array_f64))
-        elseif val isa AbstractVector && eltype(val) <: Integer
-            v = convert(Vector{Int64}, val)
-            _check(ccall(fp(:set_array_i64), Cint, (Cint, Cstring, Ptr{Clonglong}, Cint),
-                b, f, v, Cint(length(v))), sym(:set_array_i64))
-        elseif val isa AbstractVector && eltype(val) <: NamedTuple
-            for (cn, ct) in zip(fieldnames(eltype(val)), fieldtypes(eltype(val)))
-                c = string(cn)
-                if ct <: AbstractFloat
-                    col = Float64[getfield(r, cn) for r in val]
-                    _check(ccall(fp(:set_col_f64), Cint,
-                        (Cint, Cstring, Cstring, Ptr{Cdouble}, Cint),
-                        b, f, c, col, Cint(length(col))), sym(:set_col_f64))
-                elseif ct <: Integer
-                    col = Int64[getfield(r, cn) for r in val]
-                    _check(ccall(fp(:set_col_i64), Cint,
-                        (Cint, Cstring, Cstring, Ptr{Clonglong}, Cint),
-                        b, f, c, col, Cint(length(col))), sym(:set_col_i64))
-                else
-                    error("unsupported column type $ct for $f.$c")
-                end
-            end
-        else
-            error("unsupported field $f::$(typeof(val)): fields must be numbers, " *
-                  "numeric vectors, or vectors of named tuples of numbers")
-        end
+        _push_field(fp, sym, b, string(fname), val)
     end
     ccall(fp(:data_ready), Cint, (Cint,), b) == 1 ||
         error("library reports data incomplete or inconsistent after all fields were set")
@@ -262,30 +318,27 @@ end
     CNLPModel(lib::CLib; args, prefix = "rec", name = basename(lib.path))
 
 Create a model instance from `lib` and wrap it as an `AbstractNLPModel`.
-`args` is what instantiates the model: an **integer** for simple libraries
-(`<prefix>_new(n)` — one size knob), or a **named tuple** for structured
-libraries (ABI v2 builder: numbers, numeric vectors, and vectors of named
-tuples, sent columnar and validated against the library's schema). Any
+`args` is what instantiates the model, in whatever shape is natural — no
+shape is specially treated. An **integer** uses `<prefix>_new(n)` when the
+library exports it and the builder otherwise; a **named tuple** binds fields
+by name; a plain **tuple** binds positionally to the library's schema field
+order. Structured fields go through the ABI v2 builder (numbers, numeric
+vectors, and vectors of named tuples, sent columnar and validated against
+the library's schema). Any
 number of instances may coexist per library. The first library call lazily
 finishes its runtime initialization, after which the host's BLAS forwarding
 is restored — see [`restore_blas!`](@ref).
 """
 function CNLPModel(
     lib::CLib;
-    args::Union{Integer, NamedTuple},
+    args,
     prefix::AbstractString = "rec",
     name::AbstractString = basename(lib.path),
 )
     sym(s) = Symbol(prefix, "_", s)
     fp(s) = Libdl.dlsym(lib.handle, sym(s))
 
-    id = if args isa Integer
-        i = ccall(fp(:new), Cint, (Cint,), Cint(args))
-        i > 0 || _status_error(sym(:new), i)
-        i
-    else
-        _fill_data(lib, prefix, args)
-    end
+    id = _instantiate(lib, prefix, args)
     # The library's runtime is fully initialized by now: repair whatever its
     # lazy initialization did to the shared trampoline.
     restore_blas!(lib)

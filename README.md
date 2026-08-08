@@ -100,7 +100,10 @@ int32_t P_data_ready    (int32_t b);   // 1 iff every slot is filled consistentl
 int32_t P_new_from_data (int32_t b);   // → model id (>0), 0 on failure
 ```
 Tables cross the boundary **as columns** of equal length; the library
-reassembles rows internally. From Julia this is transparent:
+reassembles rows internally. From Julia this is transparent, and `args` has
+no privileged shape — an integer, a plain tuple (positional against the
+schema's field order), and a named tuple (fields by name) all instantiate
+through the same machinery, by dispatch:
 
 ```julia
 m = CNLPModel("mymodel"; args = (;
@@ -108,6 +111,9 @@ m = CNLPModel("mymodel"; args = (;
     vmin = [0.9, 0.9],                                # an array
     base = 100.0,                                     # a scalar
 ))
+m = CNLPModel("scalable"; args = 1000)        # <prefix>_new when exported,
+m = CNLPModel("scalable"; args = (1000,))     # else the builder — positional
+m = CNLPModel("scalable"; args = (; n = 1000))  # builder — by name
 ```
 
 ## Implementing a compatible library

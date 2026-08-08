@@ -23,6 +23,55 @@ int32_t tq_new(int32_t n) {
     return n_models;
 }
 
+/* ── ABI v2: schema + builder ─────────────────────────────────────────────
+ * The same model exposed through the structured-data surface, so consumers'
+ * builder paths (named tuples, positional tuples) are testable against this
+ * fixture too. One scalar field: n. */
+static const char tq_schema_str[] =
+    "{\"abi\":2,\"fields\":[{\"name\":\"n\",\"kind\":\"scalar\",\"type\":\"i64\"}]}";
+
+/* Fills buf (up to cap bytes) and returns the schema's full length. */
+int32_t tq_schema(char *buf, int32_t cap) {
+    int32_t len = (int32_t)(sizeof(tq_schema_str) - 1);
+    for (int32_t i = 0; i < cap && i < len; i++) buf[i] = tq_schema_str[i];
+    return len;
+}
+
+#define TQ_MAX_BUILDERS 16
+static int64_t builder_n[TQ_MAX_BUILDERS];
+static int32_t builder_set[TQ_MAX_BUILDERS];
+static int32_t n_builders = 0;
+
+int32_t tq_data_begin(void) {
+    if (n_builders >= TQ_MAX_BUILDERS) return 0;
+    builder_n[n_builders] = 0;
+    builder_set[n_builders] = 0;
+    n_builders++;
+    return n_builders;
+}
+
+static int strsame(const char *a, const char *b) {
+    while (*a && *b && *a == *b) { a++; b++; }
+    return *a == 0 && *b == 0;
+}
+
+int32_t tq_set_scalar_i64(int32_t b, const char *field, int64_t v) {
+    if (b < 1 || b > n_builders || !strsame(field, "n")) return 1;
+    builder_n[b - 1] = v;
+    builder_set[b - 1] = 1;
+    return 0;
+}
+
+/* 1 = complete and consistent, 0 = not. */
+int32_t tq_data_ready(int32_t b) {
+    return (b >= 1 && b <= n_builders && builder_set[b - 1]) ? 1 : 0;
+}
+
+int32_t tq_new_from_data(int32_t b) {
+    if (tq_data_ready(b) != 1) return 0;
+    return tq_new((int32_t)builder_n[b - 1]);
+}
+
 static int32_t getN(int32_t id) {
     return (id >= 1 && id <= n_models) ? Ns[id - 1] : -1;
 }

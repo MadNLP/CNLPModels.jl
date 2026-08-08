@@ -97,6 +97,28 @@ end
     @test_throws ErrorException CNLPModels.lib("nonexistent")
 end
 
+@testset "args shapes are uniform (dispatch, no special cases)" begin
+    lib = CNLPModels.load(LIBPATH)
+    # the schema names one scalar field, n — read back through the scanner
+    @test CNLPModels._schema_field_names(CNLPModels.schema_json(lib; prefix = "tq")) == ["n"]
+    m_int = CNLPModel(lib; prefix = "tq", args = 5)            # <prefix>_new
+    m_nt  = CNLPModel(lib; prefix = "tq", args = (; n = 5))    # builder, by name
+    m_tup = CNLPModel(lib; prefix = "tq", args = (5,))         # builder, positional
+    for m in (m_int, m_nt, m_tup)
+        @test m.meta.nvar == 5
+        @test obj(m, m.meta.x0) == obj(m_int, m_int.meta.x0)
+    end
+    @test m_int.id != m_nt.id != m_tup.id
+    # solves agree regardless of how the instance was made
+    r_nt = madnlp(m_nt; print_level = MadNLP.ERROR)
+    @test r_nt.status == MadNLP.SOLVE_SUCCEEDED
+    @test r_nt.objective ≈ 0.5 rtol = 1e-6
+    # a tuple of the wrong arity names the schema in the error
+    @test_throws ErrorException CNLPModel(lib; prefix = "tq", args = (5, 6))
+    # unsupported shapes fail by dispatch, not by a type-union gate
+    @test_throws MethodError CNLPModel(lib; prefix = "tq", args = "five")
+end
+
 @testset "cnlp literal is the shortcut" begin
     @test cnlp"toyqp" === CNLPModels.lib("toyqp")
     m = CNLPModel(cnlp"toyqp"; prefix = "tq", args = 5)   # directly as the lib argument
