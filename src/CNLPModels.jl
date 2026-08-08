@@ -266,6 +266,17 @@ end
 _instantiate(lib::CLib, prefix::AbstractString, data::NamedTuple) =
     _fill_data(lib, prefix, data)
 
+# `nothing` (the default) means "no instance data": valid for builder
+# libraries whose schema requires nothing — the builder round-trip with no
+# fields set. A library whose schema has required fields reports itself
+# incomplete, and a library without the builder surface has no
+# data-free constructor at all.
+function _instantiate(lib::CLib, prefix::AbstractString, ::Nothing)
+    Libdl.dlsym(lib.handle, Symbol(prefix, "_data_begin"); throw_error = false) === nothing &&
+        error("this library has no builder surface: instantiating it requires `args`")
+    return _fill_data(lib, prefix, NamedTuple())
+end
+
 # One builder field, by value dispatch: numbers are scalars, numeric vectors
 # are arrays, vectors of named tuples are tables (sent column-by-column). The
 # library itself validates names, kinds, completeness and column lengths.
@@ -319,7 +330,8 @@ end
 
 Create a model instance from `lib` and wrap it as an `AbstractNLPModel`.
 `args` is what instantiates the model, in whatever shape is natural — no
-shape is specially treated. An **integer** uses `<prefix>_new(n)` when the
+shape is specially treated, and it defaults to `nothing` (no instance data;
+valid when the library's schema requires none). An **integer** uses `<prefix>_new(n)` when the
 library exports it and the builder otherwise; a **named tuple** binds fields
 by name; a plain **tuple** binds positionally to the library's schema field
 order. Structured fields go through the ABI v2 builder (numbers, numeric
@@ -331,7 +343,7 @@ is restored — see [`restore_blas!`](@ref).
 """
 function CNLPModel(
     lib::CLib;
-    args,
+    args = nothing,
     prefix::AbstractString = "rec",
     name::AbstractString = basename(lib.path),
 )

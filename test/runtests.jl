@@ -117,6 +117,9 @@ end
     @test_throws ErrorException CNLPModel(lib; prefix = "tq", args = (5, 6))
     # unsupported shapes fail by dispatch, not by a type-union gate
     @test_throws MethodError CNLPModel(lib; prefix = "tq", args = "five")
+    # the default is nothing — no instance data. tinyqp's schema requires n,
+    # so the library reports itself incomplete.
+    @test_throws ErrorException CNLPModel(lib; prefix = "tq")
 end
 
 @testset "cnlp literal is the shortcut" begin
