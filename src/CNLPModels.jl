@@ -61,7 +61,7 @@ using LinearAlgebra
 using NLPModels
 import NLPModels: increment!, @lencheck
 
-export CNLPModel, restore_blas!
+export CNLPModel, restore_blas!, schema_json
 
 """
     CLib
@@ -115,6 +115,10 @@ struct CNLPModel <: AbstractNLPModel{Float64, Vector{Float64}}
     jac_p::Ptr{Cvoid}
     hess_structure_p::Ptr{Cvoid}
     hess_p::Ptr{Cvoid}
+    # cached Jacobian structure + a value buffer, for jprod!/jtprod!
+    jrows::Vector{Int}
+    jcols::Vector{Int}
+    jbuf::Vector{Float64}
 end
 
 @noinline _status_error(sym, st) =
@@ -126,25 +130,103 @@ end
 end
 
 """
-    CNLPModel(lib::CLib; n, prefix = "rec", name = basename(lib.path))
+    schema_json(lib::CLib; prefix = "rec") -> String
 
-Create a new model instance of size `n` from `lib` (`<prefix>_new(n)`) and
-wrap it as an `AbstractNLPModel`. Any number of instances may coexist per
-library. The first library call lazily finishes its runtime initialization,
-after which the host's BLAS forwarding is restored — see
-[`restore_blas!`](@ref).
+The library's data schema as published by `<prefix>_schema` (ABI v2,
+structured libraries only): a JSON description of the fields, kinds
+(scalar/array/table) and column types.
+"""
+function schema_json(lib::CLib; prefix::AbstractString = "rec")
+    fp = Libdl.dlsym(lib.handle, Symbol(prefix, "_schema"))
+    n = ccall(fp, Cint, (Ptr{UInt8}, Cint), C_NULL, Cint(0))
+    buf = Vector{UInt8}(undef, Int(n))
+    ccall(fp, Cint, (Ptr{UInt8}, Cint), buf, n)
+    return String(buf)
+end
+
+# Fill a builder from a NamedTuple: numbers are scalars, numeric vectors are
+# arrays, vectors of named tuples are tables (sent column-by-column). The
+# library itself validates names, kinds, completeness and column lengths.
+function _fill_data(lib::CLib, prefix::AbstractString, data::NamedTuple)
+    sym(s) = Symbol(prefix, "_", s)
+    fp(s) = Libdl.dlsym(lib.handle, sym(s))
+    b = ccall(fp(:data_begin), Cint, ())
+    b > 0 || _status_error(sym(:data_begin), b)
+    for (fname, val) in pairs(data)
+        f = string(fname)
+        if val isa AbstractFloat
+            _check(ccall(fp(:set_scalar_f64), Cint, (Cint, Cstring, Cdouble),
+                b, f, Cdouble(val)), sym(:set_scalar_f64))
+        elseif val isa Integer
+            _check(ccall(fp(:set_scalar_i64), Cint, (Cint, Cstring, Clonglong),
+                b, f, Clonglong(val)), sym(:set_scalar_i64))
+        elseif val isa AbstractVector && eltype(val) <: AbstractFloat
+            v = convert(Vector{Float64}, val)
+            _check(ccall(fp(:set_array_f64), Cint, (Cint, Cstring, Ptr{Cdouble}, Cint),
+                b, f, v, Cint(length(v))), sym(:set_array_f64))
+        elseif val isa AbstractVector && eltype(val) <: Integer
+            v = convert(Vector{Int64}, val)
+            _check(ccall(fp(:set_array_i64), Cint, (Cint, Cstring, Ptr{Clonglong}, Cint),
+                b, f, v, Cint(length(v))), sym(:set_array_i64))
+        elseif val isa AbstractVector && eltype(val) <: NamedTuple
+            for (cn, ct) in zip(fieldnames(eltype(val)), fieldtypes(eltype(val)))
+                c = string(cn)
+                if ct <: AbstractFloat
+                    col = Float64[getfield(r, cn) for r in val]
+                    _check(ccall(fp(:set_col_f64), Cint,
+                        (Cint, Cstring, Cstring, Ptr{Cdouble}, Cint),
+                        b, f, c, col, Cint(length(col))), sym(:set_col_f64))
+                elseif ct <: Integer
+                    col = Int64[getfield(r, cn) for r in val]
+                    _check(ccall(fp(:set_col_i64), Cint,
+                        (Cint, Cstring, Cstring, Ptr{Clonglong}, Cint),
+                        b, f, c, col, Cint(length(col))), sym(:set_col_i64))
+                else
+                    error("unsupported column type $ct for $f.$c")
+                end
+            end
+        else
+            error("unsupported field $f::$(typeof(val)): fields must be numbers, " *
+                  "numeric vectors, or vectors of named tuples of numbers")
+        end
+    end
+    ccall(fp(:data_ready), Cint, (Cint,), b) == 1 ||
+        error("library reports data incomplete or inconsistent after all fields were set")
+    id = ccall(fp(:new_from_data), Cint, (Cint,), b)
+    id > 0 || _status_error(sym(:new_from_data), id)
+    return id
+end
+
+"""
+    CNLPModel(lib::CLib; n, prefix = "rec", name = basename(lib.path))
+    CNLPModel(lib::CLib; data::NamedTuple, prefix = "rec", name = ...)
+
+Create a model instance from `lib` and wrap it as an `AbstractNLPModel` —
+either at size `n` (`<prefix>_new(n)`, simple libraries) or from structured
+`data` (ABI v2 builder: numbers, numeric vectors, and vectors of named
+tuples, sent columnar). Any number of instances may coexist per library.
+The first library call lazily finishes its runtime initialization, after
+which the host's BLAS forwarding is restored — see [`restore_blas!`](@ref).
 """
 function CNLPModel(
     lib::CLib;
-    n::Integer,
+    n::Union{Nothing, Integer} = nothing,
+    data::Union{Nothing, NamedTuple} = nothing,
     prefix::AbstractString = "rec",
     name::AbstractString = basename(lib.path),
 )
     sym(s) = Symbol(prefix, "_", s)
     fp(s) = Libdl.dlsym(lib.handle, sym(s))
 
-    id = ccall(fp(:new), Cint, (Cint,), Cint(n))
-    id > 0 || _status_error(sym(:new), id)
+    (n === nothing) == (data === nothing) &&
+        throw(ArgumentError("pass exactly one of n= (simple) or data= (structured)"))
+    id = if n !== nothing
+        i = ccall(fp(:new), Cint, (Cint,), Cint(n))
+        i > 0 || _status_error(sym(:new), i)
+        i
+    else
+        _fill_data(lib, prefix, data)
+    end
     # The library's runtime is fully initialized by now: repair whatever its
     # lazy initialization did to the shared trampoline.
     restore_blas!(lib)
@@ -166,11 +248,15 @@ function CNLPModel(
         x0 = x0, lvar = lvar, uvar = uvar, lcon = lcon, ucon = ucon,
         minimize = true, name = String(name),
     )
-    return CNLPModel(
+    m = CNLPModel(
         meta, Counters(), lib, id,
         fp(:obj), fp(:grad), fp(:cons),
         fp(:jac_structure), fp(:jac), fp(:hess_structure), fp(:hess),
+        Vector{Int}(undef, nnzj), Vector{Int}(undef, nnzj),
+        Vector{Float64}(undef, nnzj),
     )
+    NLPModels.jac_structure!(m, m.jrows, m.jcols)
+    return m
 end
 
 function NLPModels.obj(m::CNLPModel, x::AbstractVector{Float64})
@@ -224,6 +310,40 @@ function NLPModels.hess_structure!(
     _check(ccall(m.hess_structure_p, Cint, (Cint, Ptr{Cint}, Ptr{Cint}), m.id, r, c), :hess_structure)
     copyto!(rows, r); copyto!(cols, c)
     return rows, cols
+end
+
+for (fn, inc) in ((:jprod_nln!, :neval_jprod), (:jprod!, :neval_jprod))
+    @eval function NLPModels.$fn(
+        m::CNLPModel, x::AbstractVector{Float64}, v::AbstractVector{Float64},
+        Jv::AbstractVector{Float64},
+    )
+        @lencheck m.meta.nvar x v
+        @lencheck m.meta.ncon Jv
+        increment!(m, $(QuoteNode(inc)))
+        NLPModels.jac_coord!(m, x, m.jbuf)
+        fill!(Jv, 0.0)
+        @inbounds for k in eachindex(m.jbuf)
+            Jv[m.jrows[k]] += m.jbuf[k] * v[m.jcols[k]]
+        end
+        return Jv
+    end
+end
+
+for (fn, inc) in ((:jtprod_nln!, :neval_jtprod), (:jtprod!, :neval_jtprod))
+    @eval function NLPModels.$fn(
+        m::CNLPModel, x::AbstractVector{Float64}, v::AbstractVector{Float64},
+        Jtv::AbstractVector{Float64},
+    )
+        @lencheck m.meta.nvar x Jtv
+        @lencheck m.meta.ncon v
+        increment!(m, $(QuoteNode(inc)))
+        NLPModels.jac_coord!(m, x, m.jbuf)
+        fill!(Jtv, 0.0)
+        @inbounds for k in eachindex(m.jbuf)
+            Jtv[m.jcols[k]] += m.jbuf[k] * v[m.jrows[k]]
+        end
+        return Jtv
+    end
 end
 
 function NLPModels.hess_coord!(
