@@ -97,3 +97,8 @@ end
     @test l2 === l
     @test_throws ErrorException CNLPModels.lib("nonexistent")
 end
+
+@testset "@lib call form constructs models" begin
+    m = @lib toyqp(prefix = "tq", n = 5)
+    @test m.meta.nvar == 5
+end

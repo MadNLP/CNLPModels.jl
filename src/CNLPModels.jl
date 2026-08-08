@@ -122,12 +122,24 @@ end
 
 """
     @lib name
+    @lib name(kwargs...)
 
-Shortcut for `CNLPModels.lib("name")`: `@lib acopf` resolves and caches
-`libacopf` from the search path.
+The `@`-shortcut onto the library path: the bare form resolves and caches the
+handle (`@lib acopf`), and the call form constructs the model —
+
+    m = @lib acopf(data = data14)      # ≡ CNLPModel("acopf"; data = data14)
+    m = @lib lv(n = 1000)              # ≡ CNLPModel("lv"; n = 1000)
 """
-macro lib(name)
-    return :(lib($(string(name))))
+macro lib(ex)
+    if ex isa Symbol
+        return :(lib($(string(ex))))
+    elseif Meta.isexpr(ex, :call) && ex.args[1] isa Symbol
+        name = string(ex.args[1])
+        args = [Meta.isexpr(a, :kw) ? Expr(:kw, a.args[1], esc(a.args[2])) : esc(a)
+                for a in ex.args[2:end]]
+        return :(CNLPModel($name; $(args...)))
+    end
+    error("@lib expects a library name or name(kwargs...), got $ex")
 end
 
 """
