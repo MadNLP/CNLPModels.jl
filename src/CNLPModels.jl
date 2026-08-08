@@ -61,7 +61,7 @@ using LinearAlgebra
 import NLPModels: NLPModels, AbstractNLPModel, NLPModelMeta, Counters,
     increment!, @lencheck
 
-export CNLPModel, restore_blas!, schema_json, set_path!, @lib, @cnlp_str
+export CNLPModel, restore_blas!, schema_json, set_path!, @cnlp_str
 
 """
     CLib
@@ -123,33 +123,18 @@ end
 """
     cnlp"name"
 
-String-literal shortcut for the library handle: `cnlp"acopf"` ≡
-`CNLPModels.lib("acopf")`.
+The shortcut onto the library path: resolve `lib<name>.<dlext>` against
+[`set_path!`](@ref) / `CNLPMODELS_PATH`, check that it exists and loads as a
+shared library, and return the (cached) handle — usable directly as the
+library argument of [`CNLPModel`](@ref):
+
+    m = CNLPModel(cnlp"acopf"; args = grid)
+
+Resolution and validation happen at run time (never at parse time), so the
+literal is safe inside precompiled code.
 """
 macro cnlp_str(name)
     return :(lib($name))
-end
-
-"""
-    @lib name
-    @lib name(kwargs...)
-
-The `@`-shortcut onto the library path: the bare form resolves and caches the
-handle (`@lib acopf`), and the call form constructs the model —
-
-    m = @lib acopf(args = grid)        # ≡ CNLPModel("acopf"; args = grid)
-    m = @lib lv(args = 1000)           # ≡ CNLPModel("lv"; args = 1000)
-"""
-macro lib(ex)
-    if ex isa Symbol
-        return :(lib($(string(ex))))
-    elseif Meta.isexpr(ex, :call) && ex.args[1] isa Symbol
-        name = string(ex.args[1])
-        args = [Meta.isexpr(a, :kw) ? Expr(:kw, a.args[1], esc(a.args[2])) : esc(a)
-                for a in ex.args[2:end]]
-        return :(CNLPModel($name; $(args...)))
-    end
-    error("@lib expects a library name or name(kwargs...), got $ex")
 end
 
 """
