@@ -65,11 +65,20 @@ run(`$cc -shared -fPIC -O2 -o $LIBPATH $(joinpath(FIXDIR, "tinyqp.c"))`)
         @test all(res.solution[3:end] .≈ 1.0)
     end
 
-    @testset "re-init at another size" begin
+    @testset "multiple coexisting instances" begin
+        x = [0.5, 0.25, 2.0, -1.0]
+        o_before = obj(m, x)
         m6 = CNLPModel(lib; prefix = "tq", n = 6)
         @test m6.meta.nvar == 6
-        res = madnlp(m6; print_level = MadNLP.ERROR)
-        @test res.status == MadNLP.SOLVE_SUCCEEDED
-        @test res.objective ≈ 0.5 rtol = 1e-6
+        # Creating a second instance must not disturb the first (this was the
+        # single-slot silent-corruption hazard of the pre-handle ABI).
+        @test obj(m, x) == o_before
+        @test m.id != m6.id
+        res6 = madnlp(m6; print_level = MadNLP.ERROR)
+        res4 = madnlp(m; print_level = MadNLP.ERROR)
+        @test res6.status == MadNLP.SOLVE_SUCCEEDED
+        @test res4.status == MadNLP.SOLVE_SUCCEEDED
+        @test res6.objective ≈ 0.5 rtol = 1e-6
+        @test res4.objective ≈ 0.5 rtol = 1e-6
     end
 end

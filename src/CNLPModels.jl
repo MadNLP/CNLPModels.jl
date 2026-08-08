@@ -13,20 +13,25 @@ For a chosen symbol `prefix` (e.g. `rec`), the library exposes — all indices
 1-based, Hessian as the lower triangle of `obj_weight * ∇²f + Σ yᵢ ∇²cᵢ`,
 every function returning `Cint` status `0` on success:
 
-    <prefix>_init(n::Cint)::Cint                  # optional: instantiate at size n
-    <prefix>_nvar()::Cint
-    <prefix>_ncon()::Cint
-    <prefix>_nnzj()::Cint
-    <prefix>_nnzh()::Cint
-    <prefix>_meta(x0, lvar, uvar, lcon, ucon)::Cint          # Ptr{Cdouble} × 5
-    <prefix>_obj(x::Ptr{Cdouble}, out::Ptr{Cdouble})::Cint
-    <prefix>_grad(x::Ptr{Cdouble}, g::Ptr{Cdouble})::Cint
-    <prefix>_cons(x::Ptr{Cdouble}, c::Ptr{Cdouble})::Cint
-    <prefix>_jac_structure(rows::Ptr{Cint}, cols::Ptr{Cint})::Cint
-    <prefix>_jac(x::Ptr{Cdouble}, vals::Ptr{Cdouble})::Cint
-    <prefix>_hess_structure(rows::Ptr{Cint}, cols::Ptr{Cint})::Cint
-    <prefix>_hess(x::Ptr{Cdouble}, y::Ptr{Cdouble}, obj_weight::Cdouble,
+    <prefix>_new(n::Cint)::Cint                   # instantiate at size n; returns
+                                                  # a positive model id, 0 on failure
+    <prefix>_nvar(id::Cint)::Cint
+    <prefix>_ncon(id::Cint)::Cint
+    <prefix>_nnzj(id::Cint)::Cint
+    <prefix>_nnzh(id::Cint)::Cint
+    <prefix>_meta(id, x0, lvar, uvar, lcon, ucon)::Cint      # Ptr{Cdouble} × 5
+    <prefix>_obj(id, x::Ptr{Cdouble}, out::Ptr{Cdouble})::Cint
+    <prefix>_grad(id, x::Ptr{Cdouble}, g::Ptr{Cdouble})::Cint
+    <prefix>_cons(id, x::Ptr{Cdouble}, c::Ptr{Cdouble})::Cint
+    <prefix>_jac_structure(id, rows::Ptr{Cint}, cols::Ptr{Cint})::Cint
+    <prefix>_jac(id, x::Ptr{Cdouble}, vals::Ptr{Cdouble})::Cint
+    <prefix>_hess_structure(id, rows::Ptr{Cint}, cols::Ptr{Cint})::Cint
+    <prefix>_hess(id, x::Ptr{Cdouble}, y::Ptr{Cdouble}, obj_weight::Cdouble,
                   vals::Ptr{Cdouble})::Cint
+
+Handles make models independent: any number of `CNLPModel`s may coexist per
+library (each `<prefix>_new` call creates one; models live for the process
+lifetime).
 
 # The libblastrampoline seam
 
@@ -45,7 +50,7 @@ any time.
 ```julia
 using CNLPModels, MadNLP
 lib = CNLPModels.load("librecorder.so")
-m = CNLPModel(lib; prefix = "rec", n = 1000)   # calls rec_init(1000), fixes BLAS
+m = CNLPModel(lib; prefix = "rec", n = 1000)   # rec_new(1000) → id, fixes BLAS
 res = madnlp(m)
 ```
 """
@@ -102,6 +107,7 @@ struct CNLPModel <: AbstractNLPModel{Float64, Vector{Float64}}
     meta::NLPModelMeta{Float64, Vector{Float64}}
     counters::Counters
     lib::CLib
+    id::Cint
     obj_p::Ptr{Cvoid}
     grad_p::Ptr{Cvoid}
     cons_p::Ptr{Cvoid}
@@ -120,41 +126,39 @@ end
 end
 
 """
-    CNLPModel(lib::CLib; prefix = "rec", n = nothing, name = basename(lib.path))
+    CNLPModel(lib::CLib; n, prefix = "rec", name = basename(lib.path))
 
-Wrap the NLP exposed by `lib` under symbol `prefix` as an `AbstractNLPModel`.
-When `n` is given, `<prefix>_init(n)` is called first (this is typically the
-library's first call, after which the host's BLAS forwarding is restored —
-see [`restore_blas!`](@ref)). When `n` is `nothing`, the library must already
-be initialized; the BLAS restore is still applied.
+Create a new model instance of size `n` from `lib` (`<prefix>_new(n)`) and
+wrap it as an `AbstractNLPModel`. Any number of instances may coexist per
+library. The first library call lazily finishes its runtime initialization,
+after which the host's BLAS forwarding is restored — see
+[`restore_blas!`](@ref).
 """
 function CNLPModel(
     lib::CLib;
+    n::Integer,
     prefix::AbstractString = "rec",
-    n::Union{Nothing, Integer} = nothing,
     name::AbstractString = basename(lib.path),
 )
     sym(s) = Symbol(prefix, "_", s)
     fp(s) = Libdl.dlsym(lib.handle, sym(s))
 
-    if n !== nothing
-        st = ccall(fp(:init), Cint, (Cint,), Cint(n))
-        _check(st, sym(:init))
-    end
-    # The library's runtime is fully initialized by now (init, or an earlier
-    # call made by the user): repair whatever it did to the shared trampoline.
+    id = ccall(fp(:new), Cint, (Cint,), Cint(n))
+    id > 0 || _status_error(sym(:new), id)
+    # The library's runtime is fully initialized by now: repair whatever its
+    # lazy initialization did to the shared trampoline.
     restore_blas!(lib)
 
-    nvar = Int(ccall(fp(:nvar), Cint, ()))
-    ncon = Int(ccall(fp(:ncon), Cint, ()))
-    nnzj = Int(ccall(fp(:nnzj), Cint, ()))
-    nnzh = Int(ccall(fp(:nnzh), Cint, ()))
+    nvar = Int(ccall(fp(:nvar), Cint, (Cint,), id))
+    ncon = Int(ccall(fp(:ncon), Cint, (Cint,), id))
+    nnzj = Int(ccall(fp(:nnzj), Cint, (Cint,), id))
+    nnzh = Int(ccall(fp(:nnzh), Cint, (Cint,), id))
 
     x0 = zeros(nvar); lvar = zeros(nvar); uvar = zeros(nvar)
     lcon = zeros(ncon); ucon = zeros(ncon)
     st = ccall(fp(:meta), Cint,
-        (Ptr{Cdouble}, Ptr{Cdouble}, Ptr{Cdouble}, Ptr{Cdouble}, Ptr{Cdouble}),
-        x0, lvar, uvar, lcon, ucon)
+        (Cint, Ptr{Cdouble}, Ptr{Cdouble}, Ptr{Cdouble}, Ptr{Cdouble}, Ptr{Cdouble}),
+        id, x0, lvar, uvar, lcon, ucon)
     _check(st, sym(:meta))
 
     meta = NLPModelMeta(
@@ -163,7 +167,7 @@ function CNLPModel(
         minimize = true, name = String(name),
     )
     return CNLPModel(
-        meta, Counters(), lib,
+        meta, Counters(), lib, id,
         fp(:obj), fp(:grad), fp(:cons),
         fp(:jac_structure), fp(:jac), fp(:hess_structure), fp(:hess),
     )
@@ -173,14 +177,14 @@ function NLPModels.obj(m::CNLPModel, x::AbstractVector{Float64})
     @lencheck m.meta.nvar x
     increment!(m, :neval_obj)
     out = Ref{Cdouble}(0.0)
-    _check(ccall(m.obj_p, Cint, (Ptr{Cdouble}, Ptr{Cdouble}), x, out), :obj)
+    _check(ccall(m.obj_p, Cint, (Cint, Ptr{Cdouble}, Ptr{Cdouble}), m.id, x, out), :obj)
     return out[]
 end
 
 function NLPModels.grad!(m::CNLPModel, x::AbstractVector{Float64}, g::AbstractVector{Float64})
     @lencheck m.meta.nvar x g
     increment!(m, :neval_grad)
-    _check(ccall(m.grad_p, Cint, (Ptr{Cdouble}, Ptr{Cdouble}), x, g), :grad)
+    _check(ccall(m.grad_p, Cint, (Cint, Ptr{Cdouble}, Ptr{Cdouble}), m.id, x, g), :grad)
     return g
 end
 
@@ -188,7 +192,7 @@ function NLPModels.cons!(m::CNLPModel, x::AbstractVector{Float64}, c::AbstractVe
     @lencheck m.meta.nvar x
     @lencheck m.meta.ncon c
     increment!(m, :neval_cons)
-    _check(ccall(m.cons_p, Cint, (Ptr{Cdouble}, Ptr{Cdouble}), x, c), :cons)
+    _check(ccall(m.cons_p, Cint, (Cint, Ptr{Cdouble}, Ptr{Cdouble}), m.id, x, c), :cons)
     return c
 end
 
@@ -198,7 +202,7 @@ function NLPModels.jac_structure!(
     @lencheck m.meta.nnzj rows cols
     r = Vector{Cint}(undef, m.meta.nnzj)
     c = Vector{Cint}(undef, m.meta.nnzj)
-    _check(ccall(m.jac_structure_p, Cint, (Ptr{Cint}, Ptr{Cint}), r, c), :jac_structure)
+    _check(ccall(m.jac_structure_p, Cint, (Cint, Ptr{Cint}, Ptr{Cint}), m.id, r, c), :jac_structure)
     copyto!(rows, r); copyto!(cols, c)
     return rows, cols
 end
@@ -207,7 +211,7 @@ function NLPModels.jac_coord!(m::CNLPModel, x::AbstractVector{Float64}, vals::Ab
     @lencheck m.meta.nvar x
     @lencheck m.meta.nnzj vals
     increment!(m, :neval_jac)
-    _check(ccall(m.jac_p, Cint, (Ptr{Cdouble}, Ptr{Cdouble}), x, vals), :jac)
+    _check(ccall(m.jac_p, Cint, (Cint, Ptr{Cdouble}, Ptr{Cdouble}), m.id, x, vals), :jac)
     return vals
 end
 
@@ -217,7 +221,7 @@ function NLPModels.hess_structure!(
     @lencheck m.meta.nnzh rows cols
     r = Vector{Cint}(undef, m.meta.nnzh)
     c = Vector{Cint}(undef, m.meta.nnzh)
-    _check(ccall(m.hess_structure_p, Cint, (Ptr{Cint}, Ptr{Cint}), r, c), :hess_structure)
+    _check(ccall(m.hess_structure_p, Cint, (Cint, Ptr{Cint}, Ptr{Cint}), m.id, r, c), :hess_structure)
     copyto!(rows, r); copyto!(cols, c)
     return rows, cols
 end
@@ -231,8 +235,8 @@ function NLPModels.hess_coord!(
     @lencheck m.meta.nnzh vals
     increment!(m, :neval_hess)
     _check(ccall(m.hess_p, Cint,
-        (Ptr{Cdouble}, Ptr{Cdouble}, Cdouble, Ptr{Cdouble}),
-        x, y, Cdouble(obj_weight), vals), :hess)
+        (Cint, Ptr{Cdouble}, Ptr{Cdouble}, Cdouble, Ptr{Cdouble}),
+        m.id, x, y, Cdouble(obj_weight), vals), :hess)
     return vals
 end
 
