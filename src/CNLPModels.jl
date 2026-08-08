@@ -61,7 +61,7 @@ using LinearAlgebra
 using NLPModels
 import NLPModels: increment!, @lencheck
 
-export CNLPModel, restore_blas!, schema_json, set_path!, @lib
+export CNLPModel, restore_blas!, schema_json, set_path!, @lib, @cnlp_str
 
 """
     CLib
@@ -118,6 +118,16 @@ function lib(name::AbstractString)
         error("library $fname not found on the CNLPModels path " *
               "($(isempty(_paths()) ? "empty — call set_path! or set CNLPMODELS_PATH" : join(_paths(), ':')))")
     end
+end
+
+"""
+    cnlp"name"
+
+String-literal shortcut for the library handle: `cnlp"acopf"` ≡
+`CNLPModels.lib("acopf")`.
+"""
+macro cnlp_str(name)
+    return :(lib($name))
 end
 
 """

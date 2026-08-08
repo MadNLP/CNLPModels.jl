@@ -102,3 +102,7 @@ end
     m = @lib toyqp(prefix = "tq", n = 5)
     @test m.meta.nvar == 5
 end
+
+@testset "cnlp string literal" begin
+    @test cnlp"toyqp" === CNLPModels.lib("toyqp")
+end
