@@ -50,9 +50,12 @@ any time.
 ```julia
 using CNLPModels, MadNLP
 lib = CNLPModels.load("librecorder.so")
-m = CNLPModel(lib; prefix = "rec", n = 1000)   # rec_new(1000) → id, fixes BLAS
+m = CNLPModel(lib, 1000; prefix = "rec")   # rec_new(1000) → id, fixes BLAS
 res = madnlp(m)
 ```
+
+Instantiation arguments are positional, one per schema field — the same
+spelling `ExaModel(core, arg1, arg2, ...)` uses on the producer side.
 """
 module CNLPModels
 
@@ -85,7 +88,7 @@ const _LIBS = Dict{String, CLib}()
     set_path!(dirs...)
 
 Set the library search path used by name-based loading (`CNLPModels.lib("acopf")`,
-`CNLPModel("acopf"; ...)`, `@lib acopf`). Initialized from the colon-separated
+`CNLPModel("acopf", ...)`, `cnlp"acopf"`). Initialized from the colon-separated
 `CNLPMODELS_PATH` environment variable; calling `set_path!` replaces it.
 """
 function set_path!(dirs::AbstractString...)
@@ -128,7 +131,7 @@ The shortcut onto the library path: resolve `lib<name>.<dlext>` against
 shared library, and return the (cached) handle — usable directly as the
 library argument of [`CNLPModel`](@ref):
 
-    m = CNLPModel(cnlp"acopf"; args = grid)
+    m = CNLPModel(cnlp"acopf", bus, vmin, 100.0)
 
 Resolution and validation happen at run time (never at parse time), so the
 literal is safe inside precompiled code.
@@ -239,42 +242,51 @@ function _schema_field_names(json::AbstractString)
     return names
 end
 
-# ── Instantiation: `args` → model id, by dispatch ────────────────────────────
-# `args` has no privileged shape. An Integer, a plain Tuple, and a NamedTuple
-# all instantiate through the same machinery: integers use the one-knob
-# `<prefix>_new(n)` when the library exports it and fall through to the
-# builder as a 1-tuple otherwise; plain tuples bind positionally to the
-# schema's field order; named tuples bind by name. Anything else is a
-# MethodError by construction.
-
-function _instantiate(lib::CLib, prefix::AbstractString, n::Integer)
-    p = Libdl.dlsym(lib.handle, Symbol(prefix, "_new"); throw_error = false)
-    p === nothing && return _instantiate(lib, prefix, (n,))
-    id = ccall(p, Cint, (Cint,), Cint(n))
-    id > 0 || _status_error(Symbol(prefix, "_new"), id)
-    return id
-end
+# ── Instantiation: positional arguments → model id ───────────────────────────
+#
+# Arguments are positional — one value per schema field, in the order the
+# library publishes them. That is deliberately the same convention the producer
+# side uses: an `ExaCore` built against placeholders is instantiated as
+# `ExaModel(core, arg1, arg2, ...)` and compiled as
+# `compile_library(out, core, arg1, ...)`, so a compiled model is consumed the
+# way it was written. The schema a compiled recipe publishes names its fields
+# `arg1`, `arg2`, ... for exactly that reason.
+#
+# A field's value is a scalar, an array, or a table (a vector of named tuples,
+# sent columnar) — the same grammar the producer derives its schema from.
+#
+# A lone integer takes the one-knob `<prefix>_new(n)` when the library exports
+# it, and falls through to the builder otherwise. The two surfaces are disjoint
+# in practice: `compile_library` emits `P_new` and no builder precisely when the
+# schema is a single integer scalar.
 
 function _instantiate(lib::CLib, prefix::AbstractString, args::Tuple)
-    names = _schema_field_names(schema_json(lib; prefix = prefix))
-    length(names) == length(args) || error(
-        "positional args have $(length(args)) entries but the library's schema " *
-        "declares $(length(names)) fields: " * join(names, ", "))
-    return _instantiate(lib, prefix, NamedTuple{Tuple(Symbol.(names))}(args))
+    if length(args) == 1 && args[1] isa Integer
+        p = Libdl.dlsym(lib.handle, Symbol(prefix, "_new"); throw_error = false)
+        if p !== nothing
+            id = ccall(p, Cint, (Cint,), Cint(args[1]))
+            id > 0 || _status_error(Symbol(prefix, "_new"), id)
+            return id
+        end
+    end
+    return _fill_data(lib, prefix, _bind(lib, prefix, args))
 end
 
-_instantiate(lib::CLib, prefix::AbstractString, data::NamedTuple) =
-    _fill_data(lib, prefix, data)
-
-# `nothing` (the default) means "no instance data": valid for builder
-# libraries whose schema requires nothing — the builder round-trip with no
-# fields set. A library whose schema has required fields reports itself
-# incomplete, and a library without the builder surface has no
-# data-free constructor at all.
-function _instantiate(lib::CLib, prefix::AbstractString, ::Nothing)
+# Positional arguments against the schema's field order. No arguments at all is
+# the "no instance data" case, and is checked the same way — a schema declaring
+# fields says so here, rather than the library reporting itself incomplete
+# several calls later.
+function _bind(lib::CLib, prefix::AbstractString, args::Tuple)
     Libdl.dlsym(lib.handle, Symbol(prefix, "_data_begin"); throw_error = false) === nothing &&
-        error("this library has no builder surface: instantiating it requires `args`")
-    return _fill_data(lib, prefix, NamedTuple())
+        error("this library has no builder surface: it instantiates from a " *
+              "single integer, `CNLPModel(lib, n)`")
+    names = _schema_field_names(schema_json(lib; prefix = prefix))
+    length(names) == length(args) || error(
+        "given $(length(args)) argument$(length(args) == 1 ? "" : "s") but the " *
+        "library's schema declares $(length(names)) field" *
+        "$(length(names) == 1 ? "" : "s")" *
+        (isempty(names) ? "" : ": " * join(names, ", ")))
+    return NamedTuple{Tuple(Symbol.(names))}(args)
 end
 
 # One builder field, by value dispatch: numbers are scalars, numeric vectors
@@ -326,24 +338,32 @@ function _fill_data(lib::CLib, prefix::AbstractString, data::NamedTuple)
 end
 
 """
-    CNLPModel(lib::CLib; args, prefix = "rec", name = basename(lib.path))
+    CNLPModel(lib::CLib, arg1, arg2, ...; prefix = "rec", name = basename(lib.path))
 
 Create a model instance from `lib` and wrap it as an `AbstractNLPModel`.
-`args` is what instantiates the model, in whatever shape is natural — no
-shape is specially treated, and it defaults to `nothing` (no instance data;
-valid when the library's schema requires none). An **integer** uses `<prefix>_new(n)` when the
-library exports it and the builder otherwise; a **named tuple** binds fields
-by name; a plain **tuple** binds positionally to the library's schema field
-order. Structured fields go through the ABI v2 builder (numbers, numeric
-vectors, and vectors of named tuples, sent columnar and validated against
-the library's schema). Any
-number of instances may coexist per library. The first library call lazily
-finishes its runtime initialization, after which the host's BLAS forwarding
-is restored — see [`restore_blas!`](@ref).
+
+The arguments are the values the model is instantiated with — one per field of
+the library's schema, positionally, in the order the library publishes them.
+This is the same spelling the producer side uses (`ExaModel(core, arg1, ...)`,
+`compile_library(out, core, arg1, ...)`), so a compiled model is consumed the
+way it was written.
+
+Each value is a **number**, a **numeric vector**, or a **table** (a vector of
+named tuples, sent to the ABI v2 builder column by column and validated against
+the library's schema). A lone integer uses `<prefix>_new(n)` when the library
+exports it and the builder otherwise; with no arguments at all the model is
+built from no instance data, which is valid when the schema declares no fields.
+
+Any number of instances may coexist per library. The first library call lazily
+finishes its runtime initialization, after which the host's BLAS forwarding is
+restored — see [`restore_blas!`](@ref).
+
+    m = CNLPModel(lib, 1000; prefix = "rosen")             # rosen_new(1000)
+    m = CNLPModel(lib, [(i = 1, pd = 0.4)], [0.9], 100.0)  # table, array, scalar
 """
 function CNLPModel(
-    lib::CLib;
-    args = nothing,
+    lib::CLib,
+    args...;
     prefix::AbstractString = "rec",
     name::AbstractString = basename(lib.path),
 )
@@ -384,16 +404,16 @@ function CNLPModel(
 end
 
 """
-    CNLPModel(name::AbstractString; kwargs...)
+    CNLPModel(name::AbstractString, arg1, arg2, ...; kwargs...)
 
 Name-based construction: resolve the library via [`lib`](@ref) and default
 the symbol prefix to `name` (override with `prefix=`).
 
     set_path!("/opt/models")
-    m = CNLPModel("acopf"; args = grid)
+    m = CNLPModel("acopf", bus, vmin, 100.0)
 """
-CNLPModel(name::AbstractString; prefix::AbstractString = name, kwargs...) =
-    CNLPModel(lib(name); prefix = prefix, kwargs...)
+CNLPModel(name::AbstractString, args...; prefix::AbstractString = name, kwargs...) =
+    CNLPModel(lib(name), args...; prefix = prefix, kwargs...)
 
 function NLPModels.obj(m::CNLPModel, x::AbstractVector{Float64})
     @lencheck m.meta.nvar x

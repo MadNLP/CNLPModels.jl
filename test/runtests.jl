@@ -15,10 +15,10 @@ run(`$cc -shared -fPIC -O2 -o $LIBPATH $(joinpath(FIXDIR, "tinyqp.c"))`)
     lib = CNLPModels.load(LIBPATH)
 
     @testset "init failure surfaces" begin
-        @test_throws ErrorException CNLPModel(lib; prefix = "tq", args = 1)
+        @test_throws ErrorException CNLPModel(lib, 1; prefix = "tq")
     end
 
-    m = CNLPModel(lib; prefix = "tq", args = 4)
+    m = CNLPModel(lib, 4; prefix = "tq")
 
     @testset "meta" begin
         @test m.meta.nvar == 4
@@ -68,7 +68,7 @@ run(`$cc -shared -fPIC -O2 -o $LIBPATH $(joinpath(FIXDIR, "tinyqp.c"))`)
     @testset "multiple coexisting instances" begin
         x = [0.5, 0.25, 2.0, -1.0]
         o_before = obj(m, x)
-        m6 = CNLPModel(lib; prefix = "tq", args = 6)
+        m6 = CNLPModel(lib, 6; prefix = "tq")
         @test m6.meta.nvar == 6
         # Creating a second instance must not disturb the first (this was the
         # single-slot silent-corruption hazard of the pre-handle ABI).
@@ -91,40 +91,56 @@ end
     l = CNLPModels.lib("toyqp")
     @test l isa CNLPModels.CLib
     @test CNLPModels.lib("toyqp") === l          # cached by name
-    m = CNLPModel("toyqp"; prefix = "tq", args = 4) # name-based construction
+    m = CNLPModel("toyqp", 4; prefix = "tq") # name-based construction
     @test m.meta.nvar == 4
     @test cnlp"toyqp" === l                      # the string-literal shortcut
     @test_throws ErrorException CNLPModels.lib("nonexistent")
 end
 
-@testset "args shapes are uniform (dispatch, no special cases)" begin
+@testset "arguments are positional, one per schema field" begin
     lib = CNLPModels.load(LIBPATH)
-    # the schema names one scalar field, n — read back through the scanner
+    # `tq` declares one scalar field and also exports tq_new, so a lone integer
+    # takes the one-knob constructor.
     @test CNLPModels._schema_field_names(CNLPModels.schema_json(lib; prefix = "tq")) == ["n"]
-    m_int = CNLPModel(lib; prefix = "tq", args = 5)            # <prefix>_new
-    m_nt  = CNLPModel(lib; prefix = "tq", args = (; n = 5))    # builder, by name
-    m_tup = CNLPModel(lib; prefix = "tq", args = (5,))         # builder, positional
-    for m in (m_int, m_nt, m_tup)
-        @test m.meta.nvar == 5
-        @test obj(m, m.meta.x0) == obj(m_int, m_int.meta.x0)
-    end
-    @test m_int.id != m_nt.id != m_tup.id
-    # solves agree regardless of how the instance was made
-    r_nt = madnlp(m_nt; print_level = MadNLP.ERROR)
-    @test r_nt.status == MadNLP.SOLVE_SUCCEEDED
-    @test r_nt.objective ≈ 0.5 rtol = 1e-6
-    # a tuple of the wrong arity names the schema in the error
-    @test_throws ErrorException CNLPModel(lib; prefix = "tq", args = (5, 6))
-    # unsupported shapes fail by dispatch, not by a type-union gate
-    @test_throws MethodError CNLPModel(lib; prefix = "tq", args = "five")
-    # the default is nothing — no instance data. tinyqp's schema requires n,
-    # so the library reports itself incomplete.
+    m5 = CNLPModel(lib, 5; prefix = "tq")
+    @test m5.meta.nvar == 5
+    r5 = madnlp(m5; print_level = MadNLP.ERROR)
+    @test r5.status == MadNLP.SOLVE_SUCCEEDED
+    @test r5.objective ≈ 0.5 rtol = 1e-6
+
+    # `sq` is builder-only (no sq_new) and declares three fields, so the
+    # arguments bind positionally in the order the schema publishes them.
+    @test CNLPModels._schema_field_names(CNLPModels.schema_json(lib; prefix = "sq")) ==
+          ["n", "s", "w"]
+    n, s, w = 4, 2.0, [1.0, 2.0, 3.0, 4.0]
+    ms = CNLPModel(lib, n, s, w; prefix = "sq")
+    @test ms.meta.nvar == 4
+    @test ms.meta.ncon == 1
+    x = [0.5, 0.25, 2.0, -1.0]
+    @test obj(ms, x) == sum(w .* (x .- s) .^ 2)          # min Σ wᵢ(xᵢ-s)²
+    @test grad(ms, x) == 2.0 .* w .* (x .- s)
+    @test hess_coord(ms, x, [3.0]; obj_weight = 0.7) == 1.4 .* w
+    @test cons(ms, x) == [x[1] + x[2] - 1.0]
+
+    # Order is load-bearing: the same values in the wrong order are refused by
+    # the library's own setters (s is f64-only, w is the array field).
+    @test_throws ErrorException CNLPModel(lib, s, n, w; prefix = "sq")
+
+    # Wrong arity names the schema rather than reaching the builder.
+    @test_throws ErrorException CNLPModel(lib, 4, 2.0; prefix = "sq")
+    @test_throws ErrorException CNLPModel(lib, 5, 6; prefix = "tq")
+    # No arguments at all is the no-instance-data case; both schemas want some.
     @test_throws ErrorException CNLPModel(lib; prefix = "tq")
+    @test_throws ErrorException CNLPModel(lib; prefix = "sq")
+    # A value that cannot cross the boundary is reported as such.
+    @test_throws ErrorException CNLPModel(lib, "five"; prefix = "tq")
+    # Inconsistent structured data is the library's own call to make.
+    @test_throws ErrorException CNLPModel(lib, 4, 2.0, [1.0, 2.0]; prefix = "sq")
 end
 
 @testset "cnlp literal is the shortcut" begin
     @test cnlp"toyqp" === CNLPModels.lib("toyqp")
-    m = CNLPModel(cnlp"toyqp"; prefix = "tq", args = 5)   # directly as the lib argument
+    m = CNLPModel(cnlp"toyqp", 5; prefix = "tq")   # directly as the lib argument
     @test m.meta.nvar == 5
     @test_throws ErrorException cnlp"nonexistent"
 end

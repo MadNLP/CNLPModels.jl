@@ -148,3 +148,171 @@ int32_t tq_hess(int32_t id, const double *x, const double *y, double obj_weight,
     for (int32_t i = 0; i < N; i++) vals[i] = 2.0 * obj_weight;
     return 0;
 }
+
+/* ── A second reference model: structured data only ───────────────────────
+ * `sq` has NO one-integer constructor — instantiating it goes through the
+ * schema + builder exclusively, which is the shape a producer emits whenever
+ * the model needs more than a single size. Its schema declares two fields, so
+ * a consumer's positional binding (arg1, arg2, ...) is exercised against
+ * something wider than one field, and both scalar kinds and the array setter
+ * are covered.
+ *
+ *   min  sum_i w_i (x_i - s)^2   s.t.  x_1 + x_2 = 1        (n >= 2)
+ *
+ * Schema order — which IS the argument order — is n, s, w.
+ */
+#define SQ_MAX_MODELS 16
+#define SQ_MAX_N 64
+static int32_t sq_n[SQ_MAX_MODELS];
+static double sq_s[SQ_MAX_MODELS];
+static double sq_w[SQ_MAX_MODELS][SQ_MAX_N];
+static int32_t sq_models = 0;
+
+static const char sq_schema_str[] =
+    "{\"abi\":2,\"fields\":["
+    "{\"name\":\"n\",\"kind\":\"scalar\",\"type\":\"i64\"},"
+    "{\"name\":\"s\",\"kind\":\"scalar\",\"type\":\"f64\"},"
+    "{\"name\":\"w\",\"kind\":\"array\",\"type\":\"f64\"}]}";
+
+int32_t sq_schema(char *buf, int32_t cap) {
+    int32_t len = (int32_t)(sizeof(sq_schema_str) - 1);
+    for (int32_t i = 0; i < cap && i < len; i++) buf[i] = sq_schema_str[i];
+    return len;
+}
+
+#define SQ_MAX_BUILDERS 16
+static int64_t sqb_n[SQ_MAX_BUILDERS];
+static double sqb_s[SQ_MAX_BUILDERS];
+static double sqb_w[SQ_MAX_BUILDERS][SQ_MAX_N];
+static int32_t sqb_wlen[SQ_MAX_BUILDERS];
+static int32_t sqb_have[SQ_MAX_BUILDERS];      /* bit 0: n, bit 1: s, bit 2: w */
+static int32_t sq_builders = 0;
+
+int32_t sq_data_begin(void) {
+    if (sq_builders >= SQ_MAX_BUILDERS) return 0;
+    sqb_have[sq_builders] = 0;
+    sqb_wlen[sq_builders] = 0;
+    sq_builders++;
+    return sq_builders;
+}
+
+int32_t sq_set_scalar_i64(int32_t b, const char *field, int64_t v) {
+    if (b < 1 || b > sq_builders || !strsame(field, "n")) return 1;
+    sqb_n[b - 1] = v;
+    sqb_have[b - 1] |= 1;
+    return 0;
+}
+
+int32_t sq_set_scalar_f64(int32_t b, const char *field, double v) {
+    if (b < 1 || b > sq_builders || !strsame(field, "s")) return 1;
+    sqb_s[b - 1] = v;
+    sqb_have[b - 1] |= 2;
+    return 0;
+}
+
+int32_t sq_set_array_f64(int32_t b, const char *field, const double *v, int32_t len) {
+    if (b < 1 || b > sq_builders || !strsame(field, "w")) return 1;
+    if (len < 0 || len > SQ_MAX_N) return 1;
+    for (int32_t i = 0; i < len; i++) sqb_w[b - 1][i] = v[i];
+    sqb_wlen[b - 1] = len;
+    sqb_have[b - 1] |= 4;
+    return 0;
+}
+
+/* Complete AND consistent: w must be as long as n says. */
+int32_t sq_data_ready(int32_t b) {
+    if (b < 1 || b > sq_builders) return 0;
+    if (sqb_have[b - 1] != 7) return 0;
+    return sqb_wlen[b - 1] == (int32_t)sqb_n[b - 1] ? 1 : 0;
+}
+
+int32_t sq_new_from_data(int32_t b) {
+    if (sq_data_ready(b) != 1) return 0;
+    int32_t n = (int32_t)sqb_n[b - 1];
+    if (n < 2 || sq_models >= SQ_MAX_MODELS) return 0;
+    sq_n[sq_models] = n;
+    sq_s[sq_models] = sqb_s[b - 1];
+    for (int32_t i = 0; i < n; i++) sq_w[sq_models][i] = sqb_w[b - 1][i];
+    sq_models++;
+    return sq_models;
+}
+
+static int32_t sq_getN(int32_t id) {
+    return (id >= 1 && id <= sq_models) ? sq_n[id - 1] : -1;
+}
+
+int32_t sq_nvar(int32_t id) { return sq_getN(id); }
+int32_t sq_ncon(int32_t id) { return sq_getN(id) > 0 ? 1 : -1; }
+int32_t sq_nnzj(int32_t id) { return sq_getN(id) > 0 ? 2 : -1; }
+int32_t sq_nnzh(int32_t id) { return sq_getN(id); }
+
+int32_t sq_meta(int32_t id, double *x0, double *lvar, double *uvar, double *lcon, double *ucon) {
+    int32_t N = sq_getN(id);
+    if (N < 0) return 1;
+    for (int32_t i = 0; i < N; i++) {
+        x0[i] = 0.0;
+        lvar[i] = -INFINITY;
+        uvar[i] = INFINITY;
+    }
+    lcon[0] = 0.0;
+    ucon[0] = 0.0;
+    return 0;
+}
+
+int32_t sq_obj(int32_t id, const double *x, double *out) {
+    int32_t N = sq_getN(id);
+    if (N < 0) return 1;
+    double s = 0.0;
+    for (int32_t i = 0; i < N; i++) {
+        double d = x[i] - sq_s[id - 1];
+        s += sq_w[id - 1][i] * d * d;
+    }
+    *out = s;
+    return 0;
+}
+
+int32_t sq_grad(int32_t id, const double *x, double *g) {
+    int32_t N = sq_getN(id);
+    if (N < 0) return 1;
+    for (int32_t i = 0; i < N; i++)
+        g[i] = 2.0 * sq_w[id - 1][i] * (x[i] - sq_s[id - 1]);
+    return 0;
+}
+
+int32_t sq_cons(int32_t id, const double *x, double *c) {
+    (void)id;
+    c[0] = x[0] + x[1] - 1.0;
+    return 0;
+}
+
+int32_t sq_jac_structure(int32_t id, int32_t *rows, int32_t *cols) {
+    (void)id;
+    rows[0] = 1; cols[0] = 1;
+    rows[1] = 1; cols[1] = 2;
+    return 0;
+}
+
+int32_t sq_jac(int32_t id, const double *x, double *vals) {
+    (void)id; (void)x;
+    vals[0] = 1.0;
+    vals[1] = 1.0;
+    return 0;
+}
+
+int32_t sq_hess_structure(int32_t id, int32_t *rows, int32_t *cols) {
+    int32_t N = sq_getN(id);
+    if (N < 0) return 1;
+    for (int32_t i = 0; i < N; i++) {
+        rows[i] = i + 1;
+        cols[i] = i + 1;
+    }
+    return 0;
+}
+
+int32_t sq_hess(int32_t id, const double *x, const double *y, double obj_weight, double *vals) {
+    (void)x; (void)y;
+    int32_t N = sq_getN(id);
+    if (N < 0) return 1;
+    for (int32_t i = 0; i < N; i++) vals[i] = 2.0 * obj_weight * sq_w[id - 1][i];
+    return 0;
+}

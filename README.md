@@ -14,7 +14,7 @@ using CNLPModels, NLPModelsIpopt
 
 CNLPModels.set_path!("/opt/models")        # or the CNLPMODELS_PATH env variable
 
-m = CNLPModel("mymodel"; args = 1000)      # resolves libmymodel.so, instance of size 1000
+m = CNLPModel("mymodel", 1000)             # resolves libmymodel.so, instance of size 1000
 res = ipopt(m)
 ```
 
@@ -23,7 +23,7 @@ name, checks that the library exists and loads, and hands back the cached
 handle, directly usable as the library argument:
 
 ```julia
-m = CNLPModel(cnlp"mymodel"; args = 1000)
+m = CNLPModel(cnlp"mymodel", 1000)
 ```
 
 (Or bypass the path entirely with `CNLPModels.load("/path/libmymodel.so")`.)
@@ -100,21 +100,23 @@ int32_t P_data_ready    (int32_t b);   // 1 iff every slot is filled consistentl
 int32_t P_new_from_data (int32_t b);   // → model id (>0), 0 on failure
 ```
 Tables cross the boundary **as columns** of equal length; the library
-reassembles rows internally. From Julia this is transparent, and `args` has
-no privileged shape — an integer, a plain tuple (positional against the
-schema's field order), and a named tuple (fields by name) all instantiate
-through the same machinery, by dispatch:
+reassembles rows internally. From Julia this is transparent: the arguments are
+positional, one per schema field, in the order the library publishes them —
 
 ```julia
-m = CNLPModel("mymodel"; args = (;
-    bus  = [(i = 1, pd = 0.4), (i = 2, pd = 0.3)],   # a table
-    vmin = [0.9, 0.9],                                # an array
-    base = 100.0,                                     # a scalar
-))
-m = CNLPModel("scalable"; args = 1000)        # <prefix>_new when exported,
-m = CNLPModel("scalable"; args = (1000,))     # else the builder — positional
-m = CNLPModel("scalable"; args = (; n = 1000))  # builder — by name
+m = CNLPModel("mymodel",
+    [(i = 1, pd = 0.4), (i = 2, pd = 0.3)],   # a table
+    [0.9, 0.9],                               # an array
+    100.0,                                    # a scalar
+)
+m = CNLPModel("scalable", 1000)               # one integer: <prefix>_new when
+                                              # exported, else the builder
 ```
+
+which is the same spelling the producer side uses — `ExaModel(core, arg1,
+arg2, ...)` to instantiate a recipe, `compile_library(out, core, arg1, ...)`
+to compile one — so a model is consumed the way it was written. A library
+compiled from a recipe names its fields `arg1`, `arg2`, ... for that reason.
 
 ## Implementing a compatible library
 
@@ -126,7 +128,10 @@ m = CNLPModel("scalable"; args = (; n = 1000))  # builder — by name
    across the boundary.
 4. Check yourself against `test/fixtures/tinyqp.c` and this package's test
    suite, which compiles that file and exercises every function, including
-   the closed-form solution of the model it implements.
+   the closed-form solution of the model it implements. The file carries two
+   models: `tq_`, instantiated from one integer, and `sq_`, which has no
+   one-integer constructor and is built from a three-field schema through the
+   builder.
 
 ## Notes for libraries carrying their own runtime
 
