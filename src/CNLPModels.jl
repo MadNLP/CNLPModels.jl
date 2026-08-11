@@ -88,7 +88,7 @@ const _LIBS = Dict{String, CLib}()
     set_path!(dirs...)
 
 Set the library search path used by name-based loading (`CNLPModels.lib("acopf")`,
-`CNLPModel("acopf", ...)`, `cnlp"acopf"`). Initialized from the colon-separated
+`CNLPModel("@acopf", ...)`, `cnlp"acopf"`). Initialized from the colon-separated
 `CNLPMODELS_PATH` environment variable; calling `set_path!` replaces it.
 """
 function set_path!(dirs::AbstractString...)
@@ -421,21 +421,24 @@ end
 """
     CNLPModel(spec::AbstractString, arg1, arg2, ...; kwargs...)
 
-String-based construction. `spec` is a library **path** when it says so — it
-has a directory part, or the platform's shared-library extension — and a
-search-path **name** otherwise:
+String-based construction:
 
-  - a path is loaded (and cached) directly, and the symbol prefix defaults to
-    the file name stripped of `lib` and the extension (`.../librosen.so` →
-    `"rosen"`);
-  - a name is resolved via [`lib`](@ref) against [`set_path!`](@ref) /
-    `CNLPMODELS_PATH`, and the prefix defaults to the name itself.
+  - `"@opf"` resolves the **name** `opf` via [`lib`](@ref) against
+    [`set_path!`](@ref) / `CNLPMODELS_PATH` (`\$dir/libopf.so`, or the
+    bundled layouts `\$dir/opf/lib/libopf.so` and `\$dir/lib/libopf.so`);
+    the prefix defaults to the name;
+  - any other string is a filesystem **path**, relative to the current
+    directory or absolute, exactly as written — either the shared library
+    itself, or a bundle directory `compile_library` produced, in which case
+    the library is found inside it. The prefix defaults to the resolved
+    name stripped of `lib` and the extension (`.../librosen.so` → `"rosen"`,
+    `/path/to/opf/` → `"opf"`).
 
 Override either default with `prefix=`.
 
-    m = CNLPModel("/opt/models/rosen/lib/librosen.so", 1000)
-    set_path!("/opt/models")
-    m = CNLPModel("acopf", bus, vmin, 100.0)
+    m = CNLPModel("@acopf", bus, vmin, 100.0)     # search path
+    m = CNLPModel("rosen", 1000)                  # ./rosen (file or bundle dir)
+    m = CNLPModel("/opt/models/rosen", 1000)      # full path
 """
 function CNLPModel(
     spec::AbstractString, args...;
@@ -444,31 +447,40 @@ function CNLPModel(
     return CNLPModel(_resolve_spec(spec), args...; prefix = prefix, kwargs...)
 end
 
-# "A name is not a path": the same discrimination `compile_library` applies to
-# its `out`, so producing and consuming spell a location the same way.
-_is_pathlike(spec::AbstractString) =
-    !isempty(dirname(spec)) || endswith(spec, "." * Libdl.dlext)
+# `@name` resolves on the search path; any other string is a filesystem path,
+# relative to the current directory or absolute, exactly as written.
+_is_name(spec::AbstractString) = startswith(spec, "@")
 
 _default_prefix(spec::AbstractString) =
-    _is_pathlike(spec) ? _prefix_from_path(spec) : spec
+    _is_name(spec) ? String(spec[2:end]) : _prefix_from_path(spec)
 
-# `librosen.so` → `rosen`; a file not following the `lib<name>` convention
-# keeps its stem, and `prefix=` remains the override for libraries whose
-# symbols are named independently of the file.
+# `librosen.so` → `rosen`; a bundle directory or a file not following the
+# `lib<name>` convention keeps its stem, and `prefix=` remains the override
+# for libraries whose symbols are named independently of the file.
 function _prefix_from_path(path::AbstractString)
-    base = first(splitext(basename(path)))
+    base = first(splitext(basename(rstrip(path, '/'))))
     return startswith(base, "lib") && length(base) > 3 ? base[4:end] : base
 end
 
-# Cached like name-resolution: keys with a directory separator cannot collide
-# with bare names, so the one registry serves both.
+# A path names a shared library directly, or a bundle DIRECTORY — the layout
+# `compile_library` produces — in which case the library is found inside it.
+function _resolve_path(spec::AbstractString)
+    isfile(spec) && return String(spec)
+    if isdir(spec)
+        fname = "lib" * basename(rstrip(spec, '/')) * "." * Libdl.dlext
+        for cand in (joinpath(spec, "lib", fname), joinpath(spec, fname))
+            isfile(cand) && return cand
+        end
+        error("no shared library in $spec (tried lib/$fname and $fname)")
+    end
+    error("no shared library at $spec")
+end
+
+# Cached like name-resolution: absolute-path keys cannot collide with bare
+# names, so the one registry serves both.
 _resolve_spec(spec::AbstractString) =
-    _is_pathlike(spec) ?
-    get!(_LIBS, abspath(spec)) do
-        isfile(spec) || error("no shared library at $spec")
-        load(spec)
-    end :
-    lib(spec)
+    _is_name(spec) ? lib(spec[2:end]) :
+    get!(() -> load(_resolve_path(spec)), _LIBS, abspath(spec))
 
 function NLPModels.obj(m::CNLPModel, x::AbstractVector{Float64})
     @lencheck m.meta.nvar x

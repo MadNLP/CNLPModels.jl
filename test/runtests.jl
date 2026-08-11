@@ -91,7 +91,7 @@ end
     l = CNLPModels.lib("toyqp")
     @test l isa CNLPModels.CLib
     @test CNLPModels.lib("toyqp") === l          # cached by name
-    m = CNLPModel("toyqp", 4; prefix = "tq") # name-based construction
+    m = CNLPModel("@toyqp", 4; prefix = "tq") # name-based construction
     @test m.meta.nvar == 4
     @test cnlp"toyqp" === l                      # the string-literal shortcut
     @test_throws ErrorException CNLPModels.lib("nonexistent")
@@ -159,11 +159,15 @@ end
     @test m1.meta.nvar == 3
 end
 
-@testset "a string constructs by path or by name" begin
-    # A path — it has a directory part — loads directly; the prefix defaults
-    # from the file name (libtinyqp.so → tinyqp), overridable as always.
-    @test CNLPModels._is_pathlike(LIBPATH)
-    @test !CNLPModels._is_pathlike("tinyqp")
+@testset "a string is @name on the search path, or a literal path" begin
+    # `@name` resolves on the search path and defaults the prefix to the name.
+    @test CNLPModels._is_name("@toyqp")
+    @test CNLPModels._default_prefix("@toyqp") == "toyqp"
+
+    # Anything else is a filesystem path, exactly as written. A full path to
+    # the library file, with the prefix defaulting from the file name
+    # (libtinyqp.so → tinyqp), overridable as always:
+    @test !CNLPModels._is_name(LIBPATH)
     @test CNLPModels._default_prefix(LIBPATH) == "tinyqp"
     mp = CNLPModel(LIBPATH, 4; prefix = "tq")
     @test mp.meta.nvar == 4
@@ -172,7 +176,27 @@ end
     # A fixed model by path needs nothing beyond the path.
     mf = CNLPModel(LIBPATH; prefix = "fx")
     @test mf.meta.nvar == 3
-    # A path that is not there says so, rather than falling back to
-    # name-resolution and reporting a search-path miss.
-    @test_throws ErrorException CNLPModel(joinpath(FIXDIR, "libnope.so"), 1)
+
+    # A path to a bundle DIRECTORY finds the library inside it, and the
+    # prefix defaults from the directory name.
+    bdir = mktempdir()
+    mkpath(joinpath(bdir, "toyqp2", "lib"))
+    cp(LIBPATH, joinpath(bdir, "toyqp2", "lib", "libtoyqp2.so"))
+    @test CNLPModels._default_prefix(joinpath(bdir, "toyqp2")) == "toyqp2"
+    md = CNLPModel(joinpath(bdir, "toyqp2"), 4; prefix = "tq")
+    @test md.meta.nvar == 4
+
+    # A bare string without `@` is a file in the current directory — NOT a
+    # search-path name.
+    cd(bdir) do
+        cp(LIBPATH, joinpath(bdir, "qp.so"))
+        mc = CNLPModel("qp.so", 4; prefix = "tq")
+        @test mc.meta.nvar == 4
+        # `toyqp` is on the search path from the registry testset above, but
+        # without `@` it is a missing local file, and says so.
+        @test_throws "no shared library at" CNLPModel("toyqp", 4)
+    end
+
+    # A path that is not there fails as a path, never as a search-path miss.
+    @test_throws "no shared library at" CNLPModel(joinpath(FIXDIR, "libnope.so"), 1)
 end
