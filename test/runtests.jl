@@ -200,3 +200,61 @@ end
     # A path that is not there fails as a path, never as a search-path miss.
     @test_throws "no shared library at" CNLPModel(joinpath(FIXDIR, "libnope.so"), 1)
 end
+
+@testset "search path initializes from the environment" begin
+    old = copy(CNLPModels._PATHS)
+    withenv("CNLPMODELS_PATH" => "/a:/b") do
+        empty!(CNLPModels._PATHS)
+        @test CNLPModels._paths() == ["/a", "/b"]
+    end
+    CNLPModels.set_path!(old...)
+end
+
+@testset "a directory without a library says what it tried" begin
+    @test_throws "no shared library in" CNLPModel(mktempdir(), 1)
+end
+
+@testset "a table field binds column by column" begin
+    lib = CNLPModels.load(LIBPATH)
+    # min Σ_j w_j (x_{i_j} - 1)^2 over 3 vars: variable 1 carries rows 1 and 4.
+    pts = [(i = 1, w = 1.0), (i = 2, w = 2.0), (i = 3, w = 3.0), (i = 1, w = 0.5)]
+    m = CNLPModel(lib, pts; prefix = "tb")
+    @test (m.meta.nvar, m.meta.ncon, m.meta.nnzj, m.meta.nnzh) == (3, 0, 0, 3)
+    x = [0.0, 2.0, 4.0]
+    @test obj(m, x) == 1.5 + 2.0 + 27.0
+    @test grad(m, x) == [-3.0, 4.0, 18.0]
+    hr, hc = hess_structure(m)
+    @test hr == [1, 2, 3] && hc == [1, 2, 3]
+    @test hess_coord(m, x, Float64[]; obj_weight = 0.5) == [1.5, 2.0, 3.0]
+    # A column the library refuses surfaces as its setter's status.
+    @test_throws "set_col_i64" CNLPModel(lib, [(i = 1, w = 1.0) for _ in 1:9]; prefix = "tb")
+    # And a column type nothing can carry is refused before the boundary.
+    @test_throws "unsupported column" CNLPModel(lib, [(i = 1, w = "x")]; prefix = "tb")
+end
+
+@testset "integer weights widen through the i64 array setter" begin
+    lib = CNLPModels.load(LIBPATH)
+    m = CNLPModel(lib, 4, 2.0, [1, 2, 3, 4]; prefix = "sq")
+    x = [0.5, 0.25, 2.0, -1.0]
+    @test obj(m, x) == sum([1.0, 2.0, 3.0, 4.0] .* (x .- 2.0) .^ 2)
+    # A field value no ABI slot can carry is refused with its type named.
+    @test_throws "unsupported field" CNLPModel(lib, 4, 2.0, "w"; prefix = "sq")
+end
+
+@testset "jprod and jtprod go through the cached structure" begin
+    lib = CNLPModels.load(LIBPATH)
+    m = CNLPModel(lib, 4; prefix = "tq")
+    x = [0.5, 0.25, 2.0, -1.0]
+    v = [1.0, 2.0, 3.0, 4.0]
+    y = [5.0]
+    J = zeros(m.meta.ncon, m.meta.nvar)
+    rows, cols = jac_structure(m)
+    vals = jac_coord(m, x)
+    for k in eachindex(vals)
+        J[rows[k], cols[k]] += vals[k]
+    end
+    @test jprod(m, x, v) ≈ J * v
+    @test jtprod(m, x, y) ≈ J' * y
+    @test NLPModels.jprod_nln!(m, x, v, zeros(1)) ≈ J * v
+    @test NLPModels.jtprod_nln!(m, x, y, zeros(4)) ≈ J' * y
+end
