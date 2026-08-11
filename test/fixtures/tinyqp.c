@@ -344,3 +344,151 @@ int32_t fx_hess_structure(int32_t id, int32_t *rows, int32_t *cols) {
 int32_t fx_hess(int32_t id, const double *x, const double *y, double obj_weight, double *vals) {
     return tq_hess(id, x, y, obj_weight, vals);
 }
+
+/* ── `tb`: a TABLE field through the builder ──────────────────────────────
+ * min Σ_j w_j (x_{i_j} - 1)^2 over 3 variables, unconstrained — the one
+ * schema field is a table `pts` with columns i (i64, 1-based variable index)
+ * and w (f64, weight). Exercises the consumers' table path end-to-end. */
+static const char tb_schema_str[] =
+    "{\"abi\":2,\"fields\":[{\"name\":\"pts\",\"kind\":\"table\",\"columns\":"
+    "[{\"name\":\"i\",\"type\":\"i64\"},{\"name\":\"w\",\"type\":\"f64\"}]}]}";
+int32_t tb_schema(char *buf, int32_t cap) {
+    int32_t len = (int32_t)(sizeof(tb_schema_str) - 1);
+    for (int32_t k = 0; k < cap && k < len; k++) buf[k] = tb_schema_str[k];
+    return len;
+}
+#define TB_MAX 8
+#define TB_ROWS 8
+static int64_t tb_bi[TB_MAX][TB_ROWS];
+static double  tb_bw[TB_MAX][TB_ROWS];
+static int32_t tb_ilen[TB_MAX], tb_wlen[TB_MAX];
+static int32_t tb_nb = 0;
+static int64_t tb_mi[TB_MAX][TB_ROWS];
+static double  tb_mw[TB_MAX][TB_ROWS];
+static int32_t tb_mrows[TB_MAX];
+static int32_t tb_nm = 0;
+
+int32_t tb_data_begin(void) { return tb_nb < TB_MAX ? ++tb_nb : 0; }
+/* A column longer than the fixture can hold is refused with a nonzero
+ * status — which is also how consumers' status-check paths get exercised. */
+int32_t tb_set_col_i64(int32_t b, const char *field, const char *col, const int64_t *v, int32_t len) {
+    (void)field; (void)col;
+    if (b < 1 || b > tb_nb || len > TB_ROWS) return 1;
+    for (int32_t k = 0; k < len; k++) tb_bi[b - 1][k] = v[k];
+    tb_ilen[b - 1] = len;
+    return 0;
+}
+int32_t tb_set_col_f64(int32_t b, const char *field, const char *col, const double *v, int32_t len) {
+    (void)field; (void)col;
+    if (b < 1 || b > tb_nb || len > TB_ROWS) return 1;
+    for (int32_t k = 0; k < len; k++) tb_bw[b - 1][k] = v[k];
+    tb_wlen[b - 1] = len;
+    return 0;
+}
+int32_t tb_data_ready(int32_t b) {
+    return (b >= 1 && b <= tb_nb && tb_ilen[b - 1] > 0 && tb_ilen[b - 1] == tb_wlen[b - 1]) ? 1 : 0;
+}
+int32_t tb_new_from_data(int32_t b) {
+    if (!tb_data_ready(b) || tb_nm >= TB_MAX) return 0;
+    int32_t m = tb_nm++;
+    tb_mrows[m] = tb_ilen[b - 1];
+    for (int32_t k = 0; k < tb_mrows[m]; k++) {
+        tb_mi[m][k] = tb_bi[b - 1][k];
+        tb_mw[m][k] = tb_bw[b - 1][k];
+    }
+    return m + 1;
+}
+int32_t tb_nvar(int32_t id) { return (id >= 1 && id <= tb_nm) ? 3 : -1; }
+int32_t tb_ncon(int32_t id) { return (id >= 1 && id <= tb_nm) ? 0 : -1; }
+int32_t tb_nnzj(int32_t id) { return (id >= 1 && id <= tb_nm) ? 0 : -1; }
+int32_t tb_nnzh(int32_t id) { return (id >= 1 && id <= tb_nm) ? 3 : -1; }
+int32_t tb_meta(int32_t id, double *x0, double *lvar, double *uvar, double *lcon, double *ucon) {
+    (void)lcon; (void)ucon;
+    if (id < 1 || id > tb_nm) return 1;
+    for (int32_t k = 0; k < 3; k++) { x0[k] = 0.0; lvar[k] = -HUGE_VAL; uvar[k] = HUGE_VAL; }
+    return 0;
+}
+int32_t tb_obj(int32_t id, const double *x, double *out) {
+    if (id < 1 || id > tb_nm) return 1;
+    double s = 0.0;
+    for (int32_t k = 0; k < tb_mrows[id - 1]; k++) {
+        double d = x[tb_mi[id - 1][k] - 1] - 1.0;
+        s += tb_mw[id - 1][k] * d * d;
+    }
+    *out = s;
+    return 0;
+}
+int32_t tb_grad(int32_t id, const double *x, double *g) {
+    if (id < 1 || id > tb_nm) return 1;
+    for (int32_t k = 0; k < 3; k++) g[k] = 0.0;
+    for (int32_t k = 0; k < tb_mrows[id - 1]; k++)
+        g[tb_mi[id - 1][k] - 1] += 2.0 * tb_mw[id - 1][k] * (x[tb_mi[id - 1][k] - 1] - 1.0);
+    return 0;
+}
+int32_t tb_cons(int32_t id, const double *x, double *c) {
+    (void)x; (void)c;
+    return (id >= 1 && id <= tb_nm) ? 0 : 1;
+}
+int32_t tb_jac_structure(int32_t id, int32_t *rows, int32_t *cols) {
+    (void)rows; (void)cols;
+    return (id >= 1 && id <= tb_nm) ? 0 : 1;
+}
+int32_t tb_jac(int32_t id, const double *x, double *vals) {
+    (void)x; (void)vals;
+    return (id >= 1 && id <= tb_nm) ? 0 : 1;
+}
+int32_t tb_hess_structure(int32_t id, int32_t *rows, int32_t *cols) {
+    if (id < 1 || id > tb_nm) return 1;
+    for (int32_t k = 0; k < 3; k++) { rows[k] = k + 1; cols[k] = k + 1; }
+    return 0;
+}
+int32_t tb_hess(int32_t id, const double *x, const double *y, double obj_weight, double *vals) {
+    (void)x; (void)y;
+    if (id < 1 || id > tb_nm) return 1;
+    for (int32_t k = 0; k < 3; k++) vals[k] = 0.0;
+    for (int32_t k = 0; k < tb_mrows[id - 1]; k++)
+        vals[tb_mi[id - 1][k] - 1] += 2.0 * obj_weight * tb_mw[id - 1][k];
+    return 0;
+}
+
+/* ── degenerate surfaces, one consumer failure path each ────────────────── */
+/* `ns`: a builder entry point without a schema — nothing to bind against. */
+int32_t ns_data_begin(void) { return 1; }
+
+/* `bf`: schema + builder whose data_begin fails. */
+static const char bf_schema_str[] =
+    "{\"abi\":2,\"fields\":[{\"name\":\"n\",\"kind\":\"scalar\",\"type\":\"i64\"}]}";
+int32_t bf_schema(char *buf, int32_t cap) {
+    int32_t len = (int32_t)(sizeof(bf_schema_str) - 1);
+    for (int32_t k = 0; k < cap && k < len; k++) buf[k] = bf_schema_str[k];
+    return len;
+}
+int32_t bf_data_begin(void) { return 0; }
+
+/* `nf`: the builder runs to the end and new_from_data fails. */
+static const char nf_schema_str[] =
+    "{\"abi\":2,\"fields\":[{\"name\":\"n\",\"kind\":\"scalar\",\"type\":\"i64\"}]}";
+int32_t nf_schema(char *buf, int32_t cap) {
+    int32_t len = (int32_t)(sizeof(nf_schema_str) - 1);
+    for (int32_t k = 0; k < cap && k < len; k++) buf[k] = nf_schema_str[k];
+    return len;
+}
+int32_t nf_data_begin(void) { return 1; }
+int32_t nf_set_scalar_i64(int32_t b, const char *f, int64_t v) { (void)b; (void)f; (void)v; return 0; }
+int32_t nf_data_ready(int32_t b) { (void)b; return 1; }
+int32_t nf_new_from_data(int32_t b) { (void)b; return 0; }
+
+/* `zz`: a fixed library whose constructor fails. */
+int32_t zz_nargs(void) { return 0; }
+int32_t zz_new(int32_t n) { (void)n; return 0; }
+
+/* Integer weights are accepted and widened: the schema's KIND (array) is the
+ * contract; an integer literal on the caller's side is not a different field. */
+int32_t sq_set_array_i64(int32_t b, const char *field, const int64_t *v, int32_t len) {
+    if (b < 1 || b > sq_builders || !strsame(field, "w")) return 1;
+    if (len < 0 || len > SQ_MAX_N) return 1;
+    for (int32_t i = 0; i < len; i++) sqb_w[b - 1][i] = (double)v[i];
+    sqb_wlen[b - 1] = len;
+    sqb_have[b - 1] |= 4;
+    return 0;
+}
