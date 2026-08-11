@@ -464,12 +464,16 @@ end
 
 # A path names a shared library directly, or a bundle DIRECTORY — the layout
 # `compile_library` produces — in which case the library is found inside it.
+# Returned ABSOLUTE: `dlopen` treats a slash-free relative like `qp.so` as a
+# soname to search the system path for, not as a file in the current
+# directory — it resolved locally only by environmental accident and failed
+# in CI.
 function _resolve_path(spec::AbstractString)
-    isfile(spec) && return String(spec)
+    isfile(spec) && return abspath(spec)
     if isdir(spec)
         fname = "lib" * basename(rstrip(spec, '/')) * "." * Libdl.dlext
         for cand in (joinpath(spec, "lib", fname), joinpath(spec, fname))
-            isfile(cand) && return cand
+            isfile(cand) && return abspath(cand)
         end
         error("no shared library in $spec (tried lib/$fname and $fname)")
     end
