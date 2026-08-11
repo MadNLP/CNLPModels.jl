@@ -269,6 +269,21 @@ function _instantiate(lib::CLib, prefix::AbstractString, args::Tuple)
             return id
         end
     end
+    # A FIXED model — a library whose `<prefix>_nargs()` reports 0 — consumes
+    # no instantiation data: `<prefix>_new` keeps its one-integer C signature
+    # but ignores the value, so no arguments at all is the natural call. A
+    # library that does not declare its arity keeps the old behaviour and
+    # falls through to the builder surface (where a schema with no fields is
+    # the other legitimate "no instance data" case).
+    if isempty(args)
+        q = Libdl.dlsym(lib.handle, Symbol(prefix, "_nargs"); throw_error = false)
+        if q !== nothing && ccall(q, Cint, ()) == 0
+            p = Libdl.dlsym(lib.handle, Symbol(prefix, "_new"))
+            id = ccall(p, Cint, (Cint,), Cint(0))
+            id > 0 || _status_error(Symbol(prefix, "_new"), id)
+            return id
+        end
+    end
     return _fill_data(lib, prefix, _bind(lib, prefix, args))
 end
 
@@ -404,16 +419,56 @@ function CNLPModel(
 end
 
 """
-    CNLPModel(name::AbstractString, arg1, arg2, ...; kwargs...)
+    CNLPModel(spec::AbstractString, arg1, arg2, ...; kwargs...)
 
-Name-based construction: resolve the library via [`lib`](@ref) and default
-the symbol prefix to `name` (override with `prefix=`).
+String-based construction. `spec` is a library **path** when it says so — it
+has a directory part, or the platform's shared-library extension — and a
+search-path **name** otherwise:
 
+  - a path is loaded (and cached) directly, and the symbol prefix defaults to
+    the file name stripped of `lib` and the extension (`.../librosen.so` →
+    `"rosen"`);
+  - a name is resolved via [`lib`](@ref) against [`set_path!`](@ref) /
+    `CNLPMODELS_PATH`, and the prefix defaults to the name itself.
+
+Override either default with `prefix=`.
+
+    m = CNLPModel("/opt/models/rosen/lib/librosen.so", 1000)
     set_path!("/opt/models")
     m = CNLPModel("acopf", bus, vmin, 100.0)
 """
-CNLPModel(name::AbstractString, args...; prefix::AbstractString = name, kwargs...) =
-    CNLPModel(lib(name), args...; prefix = prefix, kwargs...)
+function CNLPModel(
+    spec::AbstractString, args...;
+    prefix::AbstractString = _default_prefix(spec), kwargs...,
+)
+    return CNLPModel(_resolve_spec(spec), args...; prefix = prefix, kwargs...)
+end
+
+# "A name is not a path": the same discrimination `compile_library` applies to
+# its `out`, so producing and consuming spell a location the same way.
+_is_pathlike(spec::AbstractString) =
+    !isempty(dirname(spec)) || endswith(spec, "." * Libdl.dlext)
+
+_default_prefix(spec::AbstractString) =
+    _is_pathlike(spec) ? _prefix_from_path(spec) : spec
+
+# `librosen.so` → `rosen`; a file not following the `lib<name>` convention
+# keeps its stem, and `prefix=` remains the override for libraries whose
+# symbols are named independently of the file.
+function _prefix_from_path(path::AbstractString)
+    base = first(splitext(basename(path)))
+    return startswith(base, "lib") && length(base) > 3 ? base[4:end] : base
+end
+
+# Cached like name-resolution: keys with a directory separator cannot collide
+# with bare names, so the one registry serves both.
+_resolve_spec(spec::AbstractString) =
+    _is_pathlike(spec) ?
+    get!(_LIBS, abspath(spec)) do
+        isfile(spec) || error("no shared library at $spec")
+        load(spec)
+    end :
+    lib(spec)
 
 function NLPModels.obj(m::CNLPModel, x::AbstractVector{Float64})
     @lencheck m.meta.nvar x

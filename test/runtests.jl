@@ -144,3 +144,35 @@ end
     @test m.meta.nvar == 5
     @test_throws ErrorException cnlp"nonexistent"
 end
+
+@testset "a fixed library needs no arguments" begin
+    lib = CNLPModels.load(LIBPATH)
+    # `fx` declares zero instantiation arguments (fx_nargs() == 0), so no
+    # arguments instantiate it directly through fx_new — whose integer is
+    # part of the C signature and ignored.
+    m0 = CNLPModel(lib; prefix = "fx")
+    @test m0.meta.nvar == 3
+    @test m0.meta.ncon == 1
+    @test obj(m0, [0.5, 0.5, 1.0]) == 0.5
+    # An explicit integer still works, and lands on the same fixed model.
+    m1 = CNLPModel(lib, 999; prefix = "fx")
+    @test m1.meta.nvar == 3
+end
+
+@testset "a string constructs by path or by name" begin
+    # A path — it has a directory part — loads directly; the prefix defaults
+    # from the file name (libtinyqp.so → tinyqp), overridable as always.
+    @test CNLPModels._is_pathlike(LIBPATH)
+    @test !CNLPModels._is_pathlike("tinyqp")
+    @test CNLPModels._default_prefix(LIBPATH) == "tinyqp"
+    mp = CNLPModel(LIBPATH, 4; prefix = "tq")
+    @test mp.meta.nvar == 4
+    # The handle is cached by absolute path: one dlopen per library.
+    @test CNLPModels._resolve_spec(LIBPATH) === CNLPModels._resolve_spec(LIBPATH)
+    # A fixed model by path needs nothing beyond the path.
+    mf = CNLPModel(LIBPATH; prefix = "fx")
+    @test mf.meta.nvar == 3
+    # A path that is not there says so, rather than falling back to
+    # name-resolution and reporting a search-path miss.
+    @test_throws ErrorException CNLPModel(joinpath(FIXDIR, "libnope.so"), 1)
+end

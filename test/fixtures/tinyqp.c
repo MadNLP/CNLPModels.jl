@@ -316,3 +316,31 @@ int32_t sq_hess(int32_t id, const double *x, const double *y, double obj_weight,
     for (int32_t i = 0; i < N; i++) vals[i] = 2.0 * obj_weight * sq_w[id - 1][i];
     return 0;
 }
+
+/* ── `fx`: a FIXED model — no instantiation arguments ─────────────────────
+ * The tq model at n = 3, exposed the way ExaModelsC compiles a core with no
+ * placeholders: `fx_nargs()` reports 0, and `fx_new` keeps the one-integer C
+ * signature but ignores its value. Everything after instantiation delegates
+ * to the tq implementation (the ids share one model table). */
+int32_t fx_nargs(void) { return 0; }
+int32_t fx_new(int32_t n) { (void)n; return tq_new(3); }
+int32_t fx_nvar(int32_t id) { return tq_nvar(id); }
+int32_t fx_ncon(int32_t id) { return tq_ncon(id); }
+int32_t fx_nnzj(int32_t id) { return tq_nnzj(id); }
+int32_t fx_nnzh(int32_t id) { return tq_nnzh(id); }
+int32_t fx_meta(int32_t id, double *x0, double *lvar, double *uvar, double *lcon, double *ucon) {
+    return tq_meta(id, x0, lvar, uvar, lcon, ucon);
+}
+int32_t fx_obj(int32_t id, const double *x, double *out) { return tq_obj(id, x, out); }
+int32_t fx_grad(int32_t id, const double *x, double *g) { return tq_grad(id, x, g); }
+int32_t fx_cons(int32_t id, const double *x, double *c) { return tq_cons(id, x, c); }
+int32_t fx_jac_structure(int32_t id, int32_t *rows, int32_t *cols) {
+    return tq_jac_structure(id, rows, cols);
+}
+int32_t fx_jac(int32_t id, const double *x, double *vals) { return tq_jac(id, x, vals); }
+int32_t fx_hess_structure(int32_t id, int32_t *rows, int32_t *cols) {
+    return tq_hess_structure(id, rows, cols);
+}
+int32_t fx_hess(int32_t id, const double *x, const double *y, double obj_weight, double *vals) {
+    return tq_hess(id, x, y, obj_weight, vals);
+}
