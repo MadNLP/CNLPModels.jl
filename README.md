@@ -1,7 +1,7 @@
 # CNLPModels.jl
 
-[![CI](https://github.com/MadNLP/CNLPModels.jl/actions/workflows/ci.yml/badge.svg)](https://github.com/MadNLP/CNLPModels.jl/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/MadNLP/CNLPModels.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/MadNLP/CNLPModels.jl)
+[![CI](https://github.com/madsuite-org/CNLPModels.jl/actions/workflows/ci.yml/badge.svg)](https://github.com/madsuite-org/CNLPModels.jl/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/madsuite-org/CNLPModels.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/madsuite-org/CNLPModels.jl)
 
 Load a nonlinear program (NLP) exposed by a **shared library through a plain
 C interface** and use it as an `NLPModels.AbstractNLPModel` — so any
@@ -145,5 +145,5 @@ first call and re-forwards the process-global BLAS trampoline (symptom:
 this package repairs the host's BLAS forwarding automatically after the
 library's first call; `restore_blas!(lib)` re-applies it at any time.
 
-Sibling package: [`cnlpmodels`](https://github.com/MadNLP/cnlpmodels-py) —
+Sibling package: [`cnlpmodels`](https://github.com/madsuite-org/cnlpmodels-py) —
 the same consumer for Python (ctypes + numpy).
