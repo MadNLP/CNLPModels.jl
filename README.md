@@ -1,7 +1,7 @@
 # CNLPModels.jl
 
 [![CI](https://github.com/MadNLP/CNLPModels.jl/actions/workflows/ci.yml/badge.svg)](https://github.com/MadNLP/CNLPModels.jl/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/MadNLP/CNLPModels.jl/graph/badge.svg)](https://codecov.io/gh/MadNLP/CNLPModels.jl)
+[![codecov](https://codecov.io/gh/MadNLP/CNLPModels.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/MadNLP/CNLPModels.jl)
 
 Load a nonlinear program (NLP) exposed by a **shared library through a plain
 C interface** and use it as an `NLPModels.AbstractNLPModel` — so any
@@ -17,7 +17,8 @@ using CNLPModels, NLPModelsIpopt
 
 CNLPModels.set_path!("/opt/models")        # or the CNLPMODELS_PATH env variable
 
-m = CNLPModel("mymodel", 1000)             # resolves libmymodel.so, instance of size 1000
+m = CNLPModel("@mymodel", 1000)            # resolves libmymodel.so, instance of size 1000
+# m = CNLPModel("/path/to/mymodel", 1000)  # or a literal path: library file or bundle dir
 res = ipopt(m)
 ```
 
@@ -107,12 +108,12 @@ reassembles rows internally. From Julia this is transparent: the arguments are
 positional, one per schema field, in the order the library publishes them —
 
 ```julia
-m = CNLPModel("mymodel",
+m = CNLPModel("@mymodel",
     [(i = 1, pd = 0.4), (i = 2, pd = 0.3)],   # a table
     [0.9, 0.9],                               # an array
     100.0,                                    # a scalar
 )
-m = CNLPModel("scalable", 1000)               # one integer: <prefix>_new when
+m = CNLPModel("@scalable", 1000)              # one integer: <prefix>_new when
                                               # exported, else the builder
 ```
 
