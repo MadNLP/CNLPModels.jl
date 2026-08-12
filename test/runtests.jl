@@ -258,3 +258,27 @@ end
     @test NLPModels.jprod_nln!(m, x, v, zeros(1)) ≈ J * v
     @test NLPModels.jtprod_nln!(m, x, y, zeros(4)) ≈ J' * y
 end
+
+@testset "unbundled juliac libraries are detected by their libjulia NEEDED" begin
+    # A plain C library links no libjulia: it must take the ordinary dlopen
+    # path (the whole suite above ran through it).
+    @test CNLPModels._stdlinked_libjulia(LIBPATH) === nothing
+    # Unreadable / not-an-object paths are left for dlopen to complain about.
+    @test CNLPModels._stdlinked_libjulia("/nonexistent/libfoo.so") === nothing
+    @test CNLPModels._stdlinked_libjulia(joinpath(FIXDIR, "tinyqp.c")) === nothing
+
+    # A library that links the standard libjulia soname is detected, with its
+    # version — the trigger for the private-runtime route. Built here by
+    # linking the fixture against this process's own libjulia. (Detection is
+    # a whole-function return, not a loop-local one: a regression to the
+    # latter loses the value and silently downgrades to the aborting path.)
+    if Sys.islinux()
+        using Libdl
+        libjulia = realpath(Libdl.dlpath("libjulia"))
+        ver = "$(VERSION.major).$(VERSION.minor)"
+        linked = joinpath(mktempdir(), "libtinyqp_jl.so")
+        run(`$cc -shared -fPIC -O2 -o $linked $(joinpath(FIXDIR, "tinyqp.c"))
+             -Wl,--no-as-needed $libjulia`)
+        @test CNLPModels._stdlinked_libjulia(linked) == ver
+    end
+end
