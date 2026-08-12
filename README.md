@@ -145,5 +145,14 @@ first call and re-forwards the process-global BLAS trampoline (symptom:
 this package repairs the host's BLAS forwarding automatically after the
 library's first call; `restore_blas!(lib)` re-applies it at any time.
 
+An **unbundled** juliac library — one linked against the standard `libjulia`
+instead of shipping a privatized runtime copy — cannot share the host's
+runtime: loaded as-is into a Julia process, its first call aborts. On Linux,
+`load` detects this and provisions the library with a private, salted copy of
+the *installed* Julia runtime (matching version required), patched in scratch
+at load time — so a single ~2 MB library file works in-process with nothing
+bundled. On other platforms the unbundled form is refused with an
+explanation; compile with `bundle = true` there.
+
 Sibling package: [`cnlpmodels`](https://github.com/madsuite-org/cnlpmodels-py) —
 the same consumer for Python (ctypes + numpy).
