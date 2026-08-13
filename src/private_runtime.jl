@@ -138,14 +138,32 @@ function _dlopen_private(path::AbstractString, ver::AbstractString, flags)
     # Salted runtime pair, under platform-form names: that is the form the
     # dep_libs references resolve, and the form the model's references are
     # rewritten to.
+    #
+    # The naming scheme differs per platform, and the difference is
+    # load-bearing. Linux prepends the salt (`<salt>_libjulia.so.x.y`) —
+    # patchelf grows ELF strings freely. On macOS every rewrite must fit the
+    # string it replaces (a juliac dylib has no Mach-O header padding to grow
+    # into — measured on the target, round 3), so the salt REPLACES the
+    # 8-char stem: `libjulia` → `lib<salt5>`, keeping every name, id,
+    # load-command string and dep_libs entry exactly the same length
+    # (`libjulia-internal.dylib` → `libXXXXX-internal.dylib`). References to
+    # the runtime appear in versioned AND unversioned forms; symlinks below
+    # cover the alias forms, as the real installation's symlink chain does.
     base_lj, base_int = _rt_basenames(ver)
     src_lj  = joinpath(libdir, base_lj)
     src_int = joinpath(libdir, "julia", base_int)
     (isfile(src_lj) && isfile(src_int)) || error(
         "this Julia installation has no $base_lj/$base_int pair at $libdir " *
         "to source a private runtime from")
-    s_lj  = joinpath(lib,  salt * "_" * base_lj)
-    s_int = joinpath(priv, salt * "_" * base_int)
+    if Sys.islinux()
+        s_lj  = joinpath(lib,  salt * "_" * base_lj)
+        s_int = joinpath(priv, salt * "_" * base_int)
+    else
+        stem = "lib" * lowercase(salt[1:5])
+        stem == "libjulia" && (stem = "libjulja")   # never collide with the host stem
+        s_lj  = joinpath(lib,  _restem(base_lj, stem))
+        s_int = joinpath(priv, _restem(base_int, stem))
+    end
     for (src, dst) in ((src_lj, s_lj), (src_int, s_int))
         cp(realpath(src), dst)
         chmod(dst, 0o755)
@@ -159,7 +177,7 @@ function _dlopen_private(path::AbstractString, ver::AbstractString, flags)
             _patchelf("--set-soname", basename(dst), dst)
             _patchelf("--set-rpath", rpath, dst)
         end
-        _replace_dep_libs(s_lj, salt)
+        _replace_dep_libs(s_lj, "libjulia" => salt * "_libjulia")
         for dst in (s_lj, s_int)
             _rewrite_needed(dst, ver, s_lj, s_int)
             PatchVersion.patch_version!(dst, oldver, newver)
@@ -168,19 +186,32 @@ function _dlopen_private(path::AbstractString, ver::AbstractString, flags)
         # macOS: identity is the install name — salting it is the whole of
         # what the ELF path needed sonames AND symbol versions for (two-level
         # namespace binds symbols to the install name they were found under).
-        # No rpath is ADDED anywhere: `install_name_tool -add_rpath` needs
-        # free Mach-O header padding, and these binaries have none (measured
-        # on the target: even one short fresh rpath is refused). The salted
-        # pair needs no rpath edits at all — its `@loader_path`-relative
-        # rpaths resolve inside the scratch mirror of the real layout.
-        # Every binary edit happens before the ad-hoc re-sign below.
+        # No rpath is ADDED anywhere and no string GROWS anywhere: adds need
+        # header padding these binaries lack (measured, round 3), and a grown
+        # `-change` is the same wall (untested, not risked — round 4). The
+        # stem substitution keeps every rewrite length-identical. The salted
+        # pair needs no rpath edits — its `@loader_path`-relative rpaths
+        # resolve inside the scratch mirror of the real layout. Every binary
+        # edit happens before the ad-hoc re-sign below.
         for dst in (s_lj, s_int)
             _install_name_tool("-id", "@rpath/" * basename(dst), dst)
         end
-        _replace_dep_libs(s_lj, salt)
+        _replace_dep_libs(s_lj, "libjulia" => stem)
         for dst in (s_lj, s_int)
-            _rewrite_loads_macos(dst, base_lj, base_int, s_lj, s_int)
+            _rewrite_loads_macos(dst, stem)
             _codesign_adhoc(dst)
+        end
+        # References use versioned and unversioned forms interchangeably —
+        # cover the aliases with symlinks, as the real installation's chain
+        # does (`libjulia-internal.dylib` → `.1.12.dylib` → `.1.12.6.dylib`).
+        for (alias, dst) in (
+            (stem * ".dylib", s_lj),
+            (_restem(basename(realpath(src_lj)), stem), s_lj),
+            (stem * "-internal.dylib", s_int),
+            (_restem(basename(realpath(src_int)), stem), s_int),
+        )
+            p = joinpath(dirname(dst), alias)
+            alias == basename(dst) || ispath(p) || symlink(basename(dst), p)
         end
     end
 
@@ -202,7 +233,7 @@ function _dlopen_private(path::AbstractString, ver::AbstractString, flags)
         PatchVersion.patch_version!(model, "JL_LIBJULIA_" * hostver,
                                     "JL_" * salt * "_" * hostver)
     else
-        _rewrite_loads_macos(model, base_lj, base_int, s_lj, s_int)
+        _rewrite_loads_macos(model, stem)
         _retarget_rpaths_macos(model, lib, priv)
         _codesign_adhoc(model)
     end
@@ -228,22 +259,30 @@ function _install_name_tool(args...)
     return nothing
 end
 
-# Rewrite whatever load commands reference the standard runtime pair onto the
-# salted copies. The OLD string must be exactly as recorded in the binary
-# (usually `@rpath/libjulia.x.y.dylib`), so it is read out with ObjectFile
-# rather than assumed.
-function _rewrite_loads_macos(bin::AbstractString, base_lj, base_int, s_lj, s_int)
+# `libjulia<rest>` → `<stem><rest>`, length-identical by construction.
+function _restem(name::AbstractString, stem::AbstractString)
+    startswith(name, "libjulia") ||
+        error("$name does not carry the libjulia stem to substitute")
+    return stem * name[9:end]
+end
+
+# Rewrite whatever load commands reference the runtime onto the salted stem.
+# The OLD string must be exactly as recorded in the binary — references
+# appear versioned (`@rpath/libjulia.x.y.dylib`) and unversioned
+# (`@rpath/libjulia-internal.dylib`), so they are read out with ObjectFile
+# and matched by stem, never assumed. An `@`-relative reference keeps its
+# prefix (same length); an absolute one becomes `@rpath/` + name (strictly
+# shorter). Nothing ever grows.
+function _rewrite_loads_macos(bin::AbstractString, stem::AbstractString)
     loads = open(bin, "r") do io
         oh = only(ObjectFile.readmeta(io))
         [ObjectFile.path(dl) for dl in ObjectFile.DynamicLinks(oh)]
     end
     for p in loads
         b = basename(p)
-        if b == base_lj
-            _install_name_tool("-change", p, "@rpath/" * basename(s_lj), bin)
-        elseif b == base_int
-            _install_name_tool("-change", p, "@rpath/" * basename(s_int), bin)
-        end
+        occursin(r"^libjulia(-internal)?(\.\d+)*\.dylib$", b) || continue
+        prefix = startswith(p, "@") ? p[1:(end - length(b))] : "@rpath/"
+        _install_name_tool("-change", p, prefix * _restem(b, stem), bin)
     end
     return nothing
 end
@@ -322,7 +361,7 @@ end
 # rationale as JuliaC's bundler (`replace_dep_libs`).
 const _DEP_LIBS_LENGTH = 512
 
-function _replace_dep_libs(file::AbstractString, salt::AbstractString)
+function _replace_dep_libs(file::AbstractString, subst::Pair{<:AbstractString, <:AbstractString})
     off = open(file, "r") do io
         obj = only(ObjectFile.readmeta(io))
         syms = collect(ObjectFile.Symbols(obj))
@@ -335,8 +374,7 @@ function _replace_dep_libs(file::AbstractString, salt::AbstractString)
     open(file, "r+") do io
         data = Mmap.mmap(io)
         blob = String(data[off:(off + _DEP_LIBS_LENGTH - 1)])
-        patched = Vector{UInt8}(
-            replace(blob, "libjulia" => salt * "_libjulia")[1:_DEP_LIBS_LENGTH])
+        patched = Vector{UInt8}(replace(blob, subst)[1:_DEP_LIBS_LENGTH])
         data[off:(off + _DEP_LIBS_LENGTH - 1)] .= patched
         Mmap.sync!(data)
     end
