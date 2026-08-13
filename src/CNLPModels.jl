@@ -153,12 +153,13 @@ dependencies and leaks no symbols into the host).
 An **unbundled** juliac library — one linked against the standard
 `libjulia` rather than carrying a privatized copy — cannot be loaded
 into a Julia process as-is: sharing the host's runtime, its first call
-aborts the whole process. On Linux, `load` detects this and gives the
-library a private copy of the *installed* runtime instead (patched in
-scratch, one per library file, cached), after which it behaves exactly
-like a bundled one. On other platforms the unbundled form is refused
-with an explanation — compile with `bundle = true` there. The Julia
-running here must match the version the library was linked against.
+aborts the whole process. On Linux and macOS, `load` detects this and
+gives the library a private copy of the *installed* runtime instead
+(patched in scratch, one per library file, cached), after which it
+behaves exactly like a bundled one. On Windows the unbundled form is
+refused with an explanation — compile with `bundle = true` there. The
+Julia running here must match the version the library was linked
+against.
 """
 function load(path::AbstractString)
     blas_libs = [l.libname for l in BLAS.get_config().loaded_libs]
