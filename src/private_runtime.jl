@@ -168,10 +168,14 @@ function _dlopen_private(path::AbstractString, ver::AbstractString, flags)
         # macOS: identity is the install name — salting it is the whole of
         # what the ELF path needed sonames AND symbol versions for (two-level
         # namespace binds symbols to the install name they were found under).
+        # No rpath is ADDED anywhere: `install_name_tool -add_rpath` needs
+        # free Mach-O header padding, and these binaries have none (measured
+        # on the target: even one short fresh rpath is refused). The salted
+        # pair needs no rpath edits at all — its `@loader_path`-relative
+        # rpaths resolve inside the scratch mirror of the real layout.
         # Every binary edit happens before the ad-hoc re-sign below.
         for dst in (s_lj, s_int)
             _install_name_tool("-id", "@rpath/" * basename(dst), dst)
-            _add_rpaths_macos(dst, lib, priv)
         end
         _replace_dep_libs(s_lj, salt)
         for dst in (s_lj, s_int)
@@ -199,7 +203,7 @@ function _dlopen_private(path::AbstractString, ver::AbstractString, flags)
                                     "JL_" * salt * "_" * hostver)
     else
         _rewrite_loads_macos(model, base_lj, base_int, s_lj, s_int)
-        _add_rpaths_macos(model, lib, priv)
+        _retarget_rpaths_macos(model, lib, priv)
         _codesign_adhoc(model)
     end
 
@@ -208,12 +212,19 @@ end
 
 # ── macOS binary edits ───────────────────────────────────────────────────────
 
+# The tool's own stderr is the diagnostic (it names padding problems
+# precisely), so a failure carries it — discarding it cost a debugging
+# round on the target machine.
 function _install_name_tool(args...)
     tool = Sys.which("install_name_tool")
     tool === nothing && error(
         "install_name_tool not found — the Xcode command-line tools are " *
         "needed to load an unbundled juliac library on macOS")
-    run(pipeline(`$tool $(collect(String, args))`; stderr = devnull))
+    cmd = `$tool $(collect(String, args))`
+    buf = IOBuffer()
+    success(pipeline(cmd; stdout = buf, stderr = buf)) ||
+        error("install_name_tool failed: ", strip(String(take!(buf))),
+              "\n(command: ", cmd, ")")
     return nothing
 end
 
@@ -237,16 +248,59 @@ function _rewrite_loads_macos(bin::AbstractString, base_lj, base_int, s_lj, s_in
     return nothing
 end
 
-_add_rpaths_macos(bin, lib, priv) =
-    _install_name_tool("-add_rpath", lib, "-add_rpath", priv, bin)
+# The existing LC_RPATH entries, exactly as recorded. `otool` ships beside
+# `install_name_tool`, so its absence is caught by the same error there.
+function _rpaths_macos(bin::AbstractString)
+    tool = Sys.which("otool")
+    tool === nothing && return String[]
+    out = read(`$tool -l $bin`, String)
+    paths = String[]
+    lines = split(out, '\n')
+    for (i, l) in enumerate(lines)
+        occursin(r"\bcmd LC_RPATH\b", l) || continue
+        for j in (i + 1):min(i + 3, length(lines))
+            m = match(r"^\s*path (.*?) \(offset \d+\)\s*$", lines[j])
+            m === nothing || (push!(paths, String(m.captures[1])); break)
+        end
+    end
+    return paths
+end
+
+# An unbundled juliac library carries absolute rpaths into the Julia
+# installation it was linked against (JuliaC's RPATH_JULIA: `<prefix>/lib`
+# and `<prefix>/lib/julia`). Retarget them IN PLACE onto the scratch layout —
+# `install_name_tool -rpath old new` rewrites within the existing load
+# command, so unlike `-add_rpath` it needs no header padding as long as the
+# new path is no longer than the recorded one; scratch paths are short.
+function _retarget_rpaths_macos(bin::AbstractString, lib, priv)
+    existing = _rpaths_macos(bin)
+    isempty(existing) && error(
+        "$bin carries no LC_RPATH to retarget — cannot point it at a " *
+        "private runtime")
+    hit = false
+    for p in unique(existing)
+        new = endswith(rstrip(p, '/'), "/julia") ? priv : lib
+        p == new && continue
+        _install_name_tool("-rpath", p, new, bin)
+        hit = true
+    end
+    hit || error("no rpath of $bin could be retargeted onto $lib")
+    return nothing
+end
 
 # Mandatory on arm64: install_name_tool invalidates the signature, and an
 # invalidly-signed binary is killed at load, not merely warned about. Ad-hoc
-# (`-s -`) is exactly what JuliaC's bundler applies.
+# (`-s -`) is exactly what JuliaC's bundler applies. A failure surfaces its
+# own text; a missing codesign is skipped (Intel tolerates it, and on arm64
+# the subsequent dlopen failure names the binary).
 function _codesign_adhoc(bin::AbstractString)
     cs = Sys.which("codesign")
     cs === nothing && return nothing
-    run(pipeline(`$cs -f -s - $bin`; stderr = devnull))
+    cmd = `$cs -f -s - $bin`
+    buf = IOBuffer()
+    success(pipeline(cmd; stdout = buf, stderr = buf)) ||
+        error("codesign failed: ", strip(String(take!(buf))),
+              "\n(command: ", cmd, ")")
     return nothing
 end
 
