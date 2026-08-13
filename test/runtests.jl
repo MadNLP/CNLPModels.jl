@@ -138,6 +138,58 @@ end
     @test_throws ErrorException CNLPModel(lib, 4, 2.0, [1.0, 2.0]; prefix = "sq")
 end
 
+@testset "several models in one library, selected by name" begin
+    lib = CNLPModels.load(LIBPATH)
+    x = [0.5, 0.25, 2.0, -1.0]
+    n, s, w = 4, 2.0, [1.0, 2.0, 3.0, 4.0]
+
+    # The fixture carries four models in ONE shared library. Naming one selects
+    # it, and the name is the symbol prefix its ABI functions are exported under.
+    m = CNLPModel(lib, :tq, 4)
+    @test m.meta.nvar == 4
+    @test m.meta.name == "tq"                       # the model, not the file
+
+    # A second, unrelated model out of the same library: different schema,
+    # different instantiation surface (builder-only), different objective.
+    ms = CNLPModel(lib, :sq, n, s, w)
+    @test ms.lib === m.lib                          # one library, one runtime
+    @test obj(m, x) == sum((x .- 1.0) .^ 2)
+    @test obj(ms, x) == sum(w .* (x .- s) .^ 2)
+    @test madnlp(ms; print_level = MadNLP.ERROR).status == MadNLP.SOLVE_SUCCEEDED
+
+    # Instances of DIFFERENT models coexist as freely as instances of one: each
+    # keeps its own ids, and neither disturbs the other.
+    m6 = CNLPModel(lib, :tq, 6)
+    @test m6.meta.nvar == 6
+    @test obj(m, x) == sum((x .- 1.0) .^ 2)
+    @test obj(ms, x) == sum(w .* (x .- s) .^ 2)
+
+    # A model consuming no instance data still names itself.
+    @test CNLPModel(lib, :fx).meta.name == "fx"
+
+    # The same spelling through every library argument: path, search-path name,
+    # string literal. The prefix no longer has to follow the file name.
+    @test CNLPModel(LIBPATH, :tq, 4).meta.nvar == 4
+    @test CNLPModel("@toyqp", :tq, 4).meta.nvar == 4
+    @test CNLPModel(cnlp"toyqp", :tq, 4).meta.nvar == 4
+
+    # The display name stays overridable, and defaults to the model.
+    @test CNLPModel(lib, :tq, 4; name = "mine").meta.name == "mine"
+
+    # Schemas are per model, addressed the same way.
+    @test CNLPModels._schema_field_names(CNLPModels.schema_json(lib, :sq)) ==
+          ["n", "s", "w"]
+    @test CNLPModels._schema_field_names(CNLPModels.schema_json(lib, :tq)) == ["n"]
+
+    # A name the library does not carry is reported as such, at the name —
+    # not several calls later as a missing builder surface.
+    @test_throws "carries no model named `nosuch`" CNLPModel(lib, :nosuch, 4)
+    @test_throws "carries no model named `nosuch`" CNLPModel(lib, :nosuch)
+    # Naming the model and passing `prefix=` are the same knob, so asking for
+    # both is not a method rather than one silently winning.
+    @test_throws MethodError CNLPModel(lib, :tq, 4; prefix = "sq")
+end
+
 @testset "cnlp literal is the shortcut" begin
     @test cnlp"toyqp" === CNLPModels.lib("toyqp")
     m = CNLPModel(cnlp"toyqp", 5; prefix = "tq")   # directly as the lib argument
