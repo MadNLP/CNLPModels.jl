@@ -33,11 +33,34 @@ m = CNLPModel(cnlp"mymodel", 1000)
 (Or bypass the path entirely with `CNLPModels.load("/path/libmymodel.so")`.)
 Any number of model instances may coexist per library.
 
+### Several models in one library
+
+A library may carry more than one model, each under its own symbol prefix,
+each with its own schema. Name the one you want as a **symbol**:
+
+```julia
+m = CNLPModel("@grid", :acopf, bus, 100.0)   # acopf_* inside libgrid.so
+d = CNLPModel("@grid", :dcopf, bus)          # dcopf_* in the same library
+```
+
+The symbol *is* the prefix, and it works with every library argument — an
+`"@name"`, a path, a `cnlp"..."` literal, or a `CLib`. Models in one library
+share its address space and, for a library carrying a language runtime, its
+single runtime copy (~80 MB, which is the reason to co-package a family of
+models at all); they are otherwise independent, and instances of different
+models coexist exactly as instances of one model do. Their schemas are
+addressed the same way — `schema_json(lib, :acopf)`.
+
+Omitting the symbol is the single-model spelling, where the prefix falls back
+to the library name, so a one-model library needs nothing new.
+
 ## The C ABI
 
 For a chosen symbol prefix `P` (default `"rec"`; the name-based loader
-defaults it to the library name), the library exports the functions below.
-Conventions throughout:
+defaults it to the library name, and a model named as a symbol supplies it
+directly), the library exports the functions below. A library carrying
+several models simply exports one such set per prefix — nothing else about
+the ABI changes. Conventions throughout:
 
 - every function returns `int32` **status**: `0` = success (except `P_new` /
   `P_data_begin` / `P_new_from_data` / `P_schema`, which return positive
@@ -125,17 +148,19 @@ compiled from a recipe names its fields `arg1`, `arg2`, ... for that reason.
 ## Implementing a compatible library
 
 1. Pick a prefix and export the instantiation, metadata, and evaluation
-   functions above with C linkage.
+   functions above with C linkage — one prefix per model, and a library may
+   carry as many as you like.
 2. Keep instances behind integer ids (a static table suffices — see the
    reference implementation).
 3. Return `0`/positive ids on success, nonzero/`0` on failure — never throw
    across the boundary.
 4. Check yourself against `test/fixtures/tinyqp.c` and this package's test
    suite, which compiles that file and exercises every function, including
-   the closed-form solution of the model it implements. The file carries two
-   models: `tq_`, instantiated from one integer, and `sq_`, which has no
-   one-integer constructor and is built from a three-field schema through the
-   builder.
+   the closed-form solutions of the models it implements. It is also the
+   reference for a **multi-model** library: the one file carries four,
+   `tq_` (instantiated from one integer), `sq_` (no one-integer constructor —
+   built from a three-field schema through the builder), `fx_` (no
+   instantiation data at all) and `tb_` (a table field).
 
 ## Notes for libraries carrying their own runtime
 

@@ -31,7 +31,8 @@ every function returning `Cint` status `0` on success:
 
 Handles make models independent: any number of `CNLPModel`s may coexist per
 library (each `<prefix>_new` call creates one; models live for the process
-lifetime).
+lifetime). A library may also carry *several models*, one prefix each — name
+the one you want as a symbol, `CNLPModel("@grid", :acopf, ...)`.
 
 # The libblastrampoline seam
 
@@ -208,10 +209,12 @@ end
 
 """
     schema_json(lib::CLib; prefix = "rec") -> String
+    schema_json(lib::CLib, model::Symbol) -> String
 
 The library's data schema as published by `<prefix>_schema` (ABI v2,
 structured libraries only): a JSON description of the fields, kinds
-(scalar/array/table) and column types.
+(scalar/array/table) and column types. In a library carrying several models
+the schema is per model — name it as a symbol, exactly as in [`CNLPModel`](@ref).
 """
 function schema_json(lib::CLib; prefix::AbstractString = "rec")
     fp = Libdl.dlsym(lib.handle, Symbol(prefix, "_schema"))
@@ -220,6 +223,8 @@ function schema_json(lib::CLib; prefix::AbstractString = "rec")
     ccall(fp, Cint, (Ptr{UInt8}, Cint), buf, n)
     return String(buf)
 end
+
+schema_json(lib::CLib, model::Symbol) = schema_json(lib; prefix = String(model))
 
 # Top-level field names from the schema JSON, in declaration order. The
 # schema is this package's own contract (see the README), so a structural
@@ -458,6 +463,52 @@ function CNLPModel(
     prefix::AbstractString = _default_prefix(spec), kwargs...,
 )
     return CNLPModel(_resolve_spec(spec), args...; prefix = prefix, kwargs...)
+end
+
+"""
+    CNLPModel(lib, model::Symbol, arg1, arg2, ...; name = String(model))
+
+Select a model **by name** in a library carrying several.
+
+One shared library may export any number of models, each under its own symbol
+prefix, each with its own schema and its own instances — `:acopf` binds
+`acopf_new`, `acopf_obj`, `acopf_meta`, ... So the symbol *is* the prefix, and
+naming it is the whole of model selection:
+
+    m = CNLPModel("@grid", :acopf, bus, 100.0)   # acopf_* inside libgrid.so
+    d = CNLPModel("@grid", :dcopf, bus)          # dcopf_* in the same library
+
+`lib` is anything the single-model constructors accept — a `CLib`, a `cnlp"..."`
+literal, an `"@name"`, or a path. Models in one library share the library's
+address space and, for a library carrying a language runtime, its single runtime
+copy; they are otherwise independent, and instances of different models coexist
+exactly as instances of one model do.
+
+Omitting the symbol keeps the single-model spelling, where the prefix falls back
+to the library name — so a one-model library is unaffected.
+"""
+function CNLPModel(
+    lib::CLib, model::Symbol, args...; name::AbstractString = String(model),
+)
+    _require_model(lib, model)
+    return CNLPModel(lib, args...; prefix = String(model), name = name)
+end
+
+# A name this library does not carry must be reported HERE. `_nvar` is the
+# witness because the ABI requires it of every model whichever way the model is
+# instantiated — unlike `_new` (absent from builder-only models) or
+# `_data_begin` (absent from one-knob ones). Without this check a mistyped name
+# surfaces several calls later as "this library has no builder surface", which
+# describes a single-model library rather than a name that is not in this one.
+function _require_model(lib::CLib, model::Symbol)
+    Libdl.dlsym(lib.handle, Symbol(model, "_nvar"); throw_error = false) === nothing &&
+        error("library $(lib.path) carries no model named `$model` " *
+              "(it exports no `$(model)_nvar`)")
+    return nothing
+end
+
+function CNLPModel(spec::AbstractString, model::Symbol, args...; kwargs...)
+    return CNLPModel(_resolve_spec(spec), model, args...; kwargs...)
 end
 
 # `@name` resolves on the search path; any other string is a filesystem path,
