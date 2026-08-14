@@ -334,3 +334,54 @@ end
         @test CNLPModels._stdlinked_libjulia(linked) == ver
     end
 end
+
+@testset "named blocks" begin
+    lib = CNLPModels.load(LIBPATH)
+    # The fixture publishes a layout: `x` (variable), `budget` (constraint),
+    # `w` (parameter). A consumer handed only the library learns the names the
+    # model was written with, and addresses slices by them.
+    m = CNLPModel(lib, 4; prefix = "tq")
+    @test keys(get_vars(m)) == (:x,)
+    @test keys(get_cons(m)) == (:budget,)
+    @test keys(get_pars(m)) == (:w,)
+
+    b = get_vars(m, :x)
+    @test b === get_vars(m).x
+    @test (b.kind, b.offset, b.length, b.dims) == (:var, 0, 4, (4,))
+    # Lengths follow the INSTANCE, not the library: a second model at another
+    # size reports its own.
+    @test get_vars(CNLPModel(lib, 7; prefix = "tq"), :x).length == 7
+
+    # The two ways of asking wrongly are distinguished: a name of the wrong
+    # kind names the accessor that would work, a typo lists what exists.
+    @test_throws "is a parameter (get_pars), not a var" get_vars(m, :w)
+    @test_throws "is a variable (get_vars), not a par" get_pars(m, :x)
+    @test_throws "no named variable `nope`" get_vars(m, :nope)
+
+    # Result extraction, against a hand-built result: the block reshapes its
+    # own slice, which is the whole point of publishing dims.
+    res = (solution = [1.0, 2.0, 3.0, 4.0], multipliers = [7.0],
+           multipliers_L = [0.1, 0.2, 0.3, 0.4], multipliers_U = [0.5, 0.6, 0.7, 0.8])
+    @test solution(res, b) == [1.0, 2.0, 3.0, 4.0]
+    @test multipliers(res, get_cons(m, :budget)) == [7.0]
+    @test multipliers_L(res, b) == [0.1, 0.2, 0.3, 0.4]
+    @test multipliers_U(res, b) == [0.5, 0.6, 0.7, 0.8]
+
+    # Parameters are live state, per instance.
+    p = get_pars(m, :w)
+    set_value!(m, p, [3.0, 4.0])
+    @test get_value(m, p) == [3.0, 4.0]
+    m2 = CNLPModel(lib, 4; prefix = "tq")
+    set_value!(m2, get_pars(m2, :w), [9.0, 9.0])
+    @test get_value(m, p) == [3.0, 4.0]          # the first is undisturbed
+    @test_throws DimensionMismatch set_value!(m, p, [1.0])
+    @test_throws "not a parameter" get_value(m, b)
+
+    # Named blocks are an optional ABI surface, not a requirement: `sq`
+    # publishes none — as a hand-written C library may — and everything else
+    # about it still works.
+    ms = CNLPModel(lib, 4, 2.0, [1.0, 2.0, 3.0, 4.0]; prefix = "sq")
+    @test keys(get_vars(ms)) == ()
+    @test_throws "publishes no named blocks" get_vars(ms, :x)
+    @test ms.meta.nvar == 4
+end

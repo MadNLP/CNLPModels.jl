@@ -105,7 +105,7 @@ int32_t P_hess(int32_t id, const double* x, const double* y,       // y has leng
                double obj_weight, double* vals);                   // length nnzh
 ```
 
-### Structured instantiation (optional, "ABI v2")
+### Structured instantiation (optional)
 
 Libraries whose models are built from structured data (tables, arrays,
 scalars) publish a schema and take the data through a builder:
@@ -114,7 +114,7 @@ scalars) publish a schema and take the data through a builder:
 int32_t P_schema(uint8_t* buf, int32_t len);   // returns needed length; fills buf
 ```
 The schema is JSON:
-`{"abi":2,"fields":[{"name":"...","kind":"scalar"|"array"|"table",
+`{"fields":[{"name":"...","kind":"scalar"|"array"|"table",
 "type":"f64"|"i64", "columns":[{"name":"...","type":"..."}]}]}`.
 
 ```c

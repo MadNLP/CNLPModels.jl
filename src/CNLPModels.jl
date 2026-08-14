@@ -65,7 +65,9 @@ using LinearAlgebra
 import NLPModels: NLPModels, AbstractNLPModel, NLPModelMeta, Counters,
     increment!, @lencheck
 
-export CNLPModel, restore_blas!, schema_json, set_path!, @cnlp_str
+export CNLPModel, restore_blas!, schema_json, set_path!, @cnlp_str,
+    get_vars, get_cons, get_pars, get_value, set_value!,
+    solution, multipliers, multipliers_L, multipliers_U
 
 include("patchversion.jl")
 include("private_runtime.jl")
@@ -198,6 +200,68 @@ struct CNLPModel <: AbstractNLPModel{Float64, Vector{Float64}}
     jrows::Vector{Int}
     jcols::Vector{Int}
     jbuf::Vector{Float64}
+    # the model's NAMED blocks, read from the library at construction, and the
+    # prefix they are addressed under (parameters are read and written through
+    # it after the fact)
+    prefix::String
+    vars::NamedTuple
+    cons::NamedTuple
+    pars::NamedTuple
+end
+
+"""
+    BlockRef
+
+A named block of a compiled model — a variable, constraint or parameter — with
+the slice of the solution (or of the parameter vector) it occupies.
+
+`offset` is 0-based, as the library reports it; `dims` is the block's shape, so
+a slice can be reshaped the way `ExaModels` does rather than handed back flat.
+`index` is the library's own numbering, which is how parameters are addressed
+for [`get_value`](@ref) / [`set_value!`](@ref).
+"""
+struct BlockRef
+    name::Symbol
+    kind::Symbol          # :var, :con, :par
+    offset::Int
+    length::Int
+    dims::Dims
+    index::Cint
+end
+
+Base.show(io::IO, b::BlockRef) = print(
+    io, "BlockRef(:", b.name, ", ", b.kind, ", ", join(b.dims, "×"),
+    " at ", b.offset, ")")
+
+# The library's published layout, or empty tuples when it publishes none.
+# Named blocks are an optional part of the ABI, like the schema and builder:
+# a hand-written C library that implements only the evaluators has nothing to
+# name, and is consumed exactly as before.
+function _read_layout(lib::CLib, prefix::AbstractString, id::Cint)
+    nb = Libdl.dlsym(lib.handle, Symbol(prefix, "_nblocks"); throw_error = false)
+    nb === nothing && return ((;), (;), (;))
+    n = ccall(nb, Cint, (Cint,), id)
+    n < 0 && return ((;), (;), (;))
+    bp = Libdl.dlsym(lib.handle, Symbol(prefix, "_block"))
+    np = Libdl.dlsym(lib.handle, Symbol(prefix, "_block_name"))
+    vars, cons, pars = Pair{Symbol,BlockRef}[], Pair{Symbol,BlockRef}[], Pair{Symbol,BlockRef}[]
+    for k in 0:(Int(n) - 1)
+        out = zeros(Cint, 4 + 8)
+        _check(ccall(bp, Cint, (Cint, Cint, Ptr{Cint}), id, Cint(k), out),
+               Symbol(prefix, "_block"))
+        need = ccall(np, Cint, (Cint, Cint, Ptr{UInt8}, Cint), id, Cint(k), C_NULL, Cint(0))
+        buf = Vector{UInt8}(undef, Int(need))
+        ccall(np, Cint, (Cint, Cint, Ptr{UInt8}, Cint), id, Cint(k), buf, need)
+        name = Symbol(String(buf))
+        nd = Int(out[4])
+        b = BlockRef(name,
+                     out[1] == 0 ? :var : out[1] == 1 ? :con : :par,
+                     Int(out[2]), Int(out[3]),
+                     Dims(Int(out[4 + i]) for i in 1:nd),
+                     Cint(k))
+        push!(b.kind === :var ? vars : b.kind === :con ? cons : pars, name => b)
+    end
+    return (NamedTuple(vars), NamedTuple(cons), NamedTuple(pars))
 end
 
 @noinline _status_error(sym, st) =
@@ -212,7 +276,7 @@ end
     schema_json(lib::CLib; prefix = "rec") -> String
     schema_json(lib::CLib, model::Symbol) -> String
 
-The library's data schema as published by `<prefix>_schema` (ABI v2,
+The library's data schema as published by `<prefix>_schema` (the schema/builder surface,
 structured libraries only): a JSON description of the fields, kinds
 (scalar/array/table) and column types. In a library carrying several models
 the schema is per model — name it as a symbol, exactly as in [`CNLPModel`](@ref).
@@ -383,7 +447,7 @@ This is the same spelling the producer side uses (`ExaModel(core, arg1, ...)`,
 way it was written.
 
 Each value is a **number**, a **numeric vector**, or a **table** (a vector of
-named tuples, sent to the ABI v2 builder column by column and validated against
+named tuples, sent to the builder column by column and validated against
 the library's schema). A lone integer uses `<prefix>_new(n)` when the library
 exports it and the builder otherwise; with no arguments at all the model is
 built from no instance data, which is valid when the schema declares no fields.
@@ -426,12 +490,14 @@ function CNLPModel(
         x0 = x0, lvar = lvar, uvar = uvar, lcon = lcon, ucon = ucon,
         minimize = true, name = String(name),
     )
+    vars, cons, pars = _read_layout(lib, prefix, id)
     m = CNLPModel(
         meta, Counters(), lib, id,
         fp(:obj), fp(:grad), fp(:cons),
         fp(:jac_structure), fp(:jac), fp(:hess_structure), fp(:hess),
         Vector{Int}(undef, nnzj), Vector{Int}(undef, nnzj),
         Vector{Float64}(undef, nnzj),
+        String(prefix), vars, cons, pars,
     )
     NLPModels.jac_structure!(m, m.jrows, m.jcols)
     return m
@@ -550,6 +616,126 @@ end
 _resolve_spec(spec::AbstractString) =
     _is_name(spec) ? lib(spec[2:end]) :
     get!(() -> load(_resolve_path(spec)), _LIBS, abspath(spec))
+
+# ── Named blocks ─────────────────────────────────────────────────────────────
+
+"""
+    get_vars(model[, name])
+    get_cons(model[, name])
+    get_pars(model[, name])
+
+The model's **named** blocks of that kind, as a `NamedTuple` — or one of them
+by name.
+
+A compiled library publishes the names its model was written with, so a caller
+who never sees the Julia source can still address a slice of the solution by
+name. Pair them with [`solution`](@ref), [`multipliers`](@ref),
+[`multipliers_L`](@ref) / [`multipliers_U`](@ref), and [`get_value`](@ref) /
+[`set_value!`](@ref) for parameters — the same spellings `ExaModels` uses for a
+model built in Julia.
+
+Named blocks are optional in the ABI: a library that publishes none reports
+empty tuples, and everything else about it still works.
+
+    m = CNLPModel("@grid", :acopf, bus)
+    keys(get_vars(m))                 # (:pg, :qg, :vm, :va)
+    solution(result, get_vars(m, :pg))
+"""
+get_vars(m::CNLPModel) = getfield(m, :vars)
+
+@doc (@doc get_vars)
+get_cons(m::CNLPModel) = getfield(m, :cons)
+
+@doc (@doc get_vars)
+get_pars(m::CNLPModel) = getfield(m, :pars)
+
+get_vars(m::CNLPModel, name::Symbol) = _named_block(m, :var, name)
+@doc (@doc get_vars)
+get_cons(m::CNLPModel, name::Symbol) = _named_block(m, :con, name)
+@doc (@doc get_vars)
+get_pars(m::CNLPModel, name::Symbol) = _named_block(m, :par, name)
+
+# The two ways of being wrong are separated here for the same reason as in
+# ExaModels: named blocks share one namespace, so asking for a variable that is
+# really a parameter is at least as likely as a typo, and wants a different fix.
+function _named_block(m::CNLPModel, kind::Symbol, name::Symbol)
+    nt = kind === :var ? get_vars(m) : kind === :con ? get_cons(m) : get_pars(m)
+    haskey(nt, name) && return nt[name]
+    for (k, other) in ((:var, get_vars(m)), (:con, get_cons(m)), (:par, get_pars(m)))
+        if haskey(other, name)
+            fn = k === :var ? "get_vars" : k === :con ? "get_cons" : "get_pars"
+            throw(ArgumentError("`$name` is a $(k === :var ? "variable" :
+                k === :con ? "constraint" : "parameter") ($fn), not a $kind"))
+        end
+    end
+    what = kind === :var ? "variable" : kind === :con ? "constraint" : "parameter"
+    throw(ArgumentError(
+        "this model has no named $what `$name`; it has $(keys(nt))" *
+        (isempty(keys(nt)) ?
+         " (none — this library publishes no named blocks)" : "")))
+end
+
+"""
+    solution(result, block)
+
+The part of `result.solution` belonging to variable `block`, reshaped to the
+block's own dimensions.
+"""
+solution(result, b::BlockRef) =
+    reshape(view(result.solution, (b.offset + 1):(b.offset + b.length)), b.dims...)
+
+"""
+    multipliers(result, block)
+
+The dual variables for constraint `block`.
+"""
+multipliers(result, b::BlockRef) =
+    reshape(view(result.multipliers, (b.offset + 1):(b.offset + b.length)), b.dims...)
+
+"""
+    multipliers_L(result, block)
+    multipliers_U(result, block)
+
+The lower- and upper-bound dual variables for variable `block`.
+"""
+multipliers_L(result, b::BlockRef) =
+    reshape(view(result.multipliers_L, (b.offset + 1):(b.offset + b.length)), b.dims...)
+
+@doc (@doc multipliers_L)
+multipliers_U(result, b::BlockRef) =
+    reshape(view(result.multipliers_U, (b.offset + 1):(b.offset + b.length)), b.dims...)
+
+"""
+    get_value(model, param)
+    set_value!(model, param, values)
+
+Read or update a parameter block's values. Parameters are model state: a write
+takes effect for every later evaluation of this instance, and other instances
+of the same model keep their own.
+
+Unlike `ExaModels.get_value`, this returns a copy rather than a view — the
+values live in the library's address space, not the caller's.
+"""
+function get_value(m::CNLPModel, b::BlockRef)
+    b.kind === :par || throw(ArgumentError("`$(b.name)` is a $(b.kind), not a parameter"))
+    out = Vector{Float64}(undef, b.length)
+    fp = Libdl.dlsym(m.lib.handle, Symbol(m.prefix, "_get_value"))
+    _check(ccall(fp, Cint, (Cint, Cint, Ptr{Cdouble}, Cint),
+                 m.id, b.index, out, Cint(b.length)), Symbol(m.prefix, "_get_value"))
+    return reshape(out, b.dims...)
+end
+
+@doc (@doc get_value)
+function set_value!(m::CNLPModel, b::BlockRef, values)
+    b.kind === :par || throw(ArgumentError("`$(b.name)` is a $(b.kind), not a parameter"))
+    v = convert(Vector{Float64}, vec(collect(values)))
+    length(v) == b.length || throw(DimensionMismatch(
+        "parameter `$(b.name)` has $(b.length) elements, got $(length(v))"))
+    fp = Libdl.dlsym(m.lib.handle, Symbol(m.prefix, "_set_value"))
+    _check(ccall(fp, Cint, (Cint, Cint, Ptr{Cdouble}, Cint),
+                 m.id, b.index, v, Cint(b.length)), Symbol(m.prefix, "_set_value"))
+    return m
+end
 
 function NLPModels.obj(m::CNLPModel, x::AbstractVector{Float64})
     @lencheck m.meta.nvar x

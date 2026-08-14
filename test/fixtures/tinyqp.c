@@ -12,7 +12,7 @@
 #include <stdint.h>
 #include <math.h>
 
-#define TQ_MAX_MODELS 16
+#define TQ_MAX_MODELS 64
 static int32_t Ns[TQ_MAX_MODELS];
 static int32_t n_models = 0;
 
@@ -23,12 +23,12 @@ int32_t tq_new(int32_t n) {
     return n_models;
 }
 
-/* ── ABI v2: schema + builder ─────────────────────────────────────────────
+/* ── schema + builder ─────────────────────────────────────────────
  * The same model exposed through the structured-data surface, so consumers'
  * builder paths (named tuples, positional tuples) are testable against this
  * fixture too. One scalar field: n. */
 static const char tq_schema_str[] =
-    "{\"abi\":2,\"fields\":[{\"name\":\"n\",\"kind\":\"scalar\",\"type\":\"i64\"}]}";
+    "{\"fields\":[{\"name\":\"n\",\"kind\":\"scalar\",\"type\":\"i64\"}]}";
 
 /* Fills buf (up to cap bytes) and returns the schema's full length. */
 int32_t tq_schema(char *buf, int32_t cap) {
@@ -74,6 +74,55 @@ int32_t tq_new_from_data(int32_t b) {
 
 static int32_t getN(int32_t id) {
     return (id >= 1 && id <= n_models) ? Ns[id - 1] : -1;
+}
+
+/* ── Named blocks ─────────────────────────────────────────────────────────
+ * The layout surface a compiled ExaModels library publishes: which named
+ * variable, constraint and parameter blocks the model has, and where each one
+ * sits.  `tq` names its variable `x`, its constraint `budget`, and carries a
+ * two-element parameter block `w` — enough for a consumer to be exercised
+ * against every kind without a Julia toolchain anywhere.
+ *
+ * Offsets are 0-based and lengths follow the instance, exactly as the
+ * generated libraries report them.
+ */
+static double tq_w[TQ_MAX_MODELS][2];
+
+int32_t tq_nblocks(int32_t id) { return getN(id) > 0 ? 3 : -1; }
+
+int32_t tq_block_name(int32_t id, int32_t k, uint8_t *buf, int32_t cap) {
+    const char *nm = k == 0 ? "x" : k == 1 ? "budget" : k == 2 ? "w" : 0;
+    if (getN(id) <= 0 || !nm) return -1;
+    int32_t len = 0;
+    while (nm[len]) len++;
+    for (int32_t i = 0; i < cap && i < len; i++) buf[i] = (uint8_t)nm[i];
+    return len;
+}
+
+/* out: [kind, offset, length, ndims, dims...]; kind 0 = var, 1 = con, 2 = par */
+int32_t tq_block(int32_t id, int32_t k, int32_t *out) {
+    int32_t N = getN(id);
+    if (N <= 0) return 1;
+    if (k == 0)      { out[0] = 0; out[1] = 0; out[2] = N; out[3] = 1; out[4] = N; return 0; }
+    else if (k == 1) { out[0] = 1; out[1] = 0; out[2] = 1; out[3] = 1; out[4] = 1; return 0; }
+    else if (k == 2) { out[0] = 2; out[1] = 0; out[2] = 2; out[3] = 1; out[4] = 2; return 0; }
+    return 1;
+}
+
+int32_t tq_get_value(int32_t id, int32_t k, double *vals, int32_t len) {
+    if (getN(id) <= 0 || k != 2) return 1;
+    if (len != 2) return 3;
+    vals[0] = tq_w[id - 1][0];
+    vals[1] = tq_w[id - 1][1];
+    return 0;
+}
+
+int32_t tq_set_value(int32_t id, int32_t k, const double *vals, int32_t len) {
+    if (getN(id) <= 0 || k != 2) return 1;
+    if (len != 2) return 3;
+    tq_w[id - 1][0] = vals[0];
+    tq_w[id - 1][1] = vals[1];
+    return 0;
 }
 
 int32_t tq_nvar(int32_t id) { return getN(id); }
@@ -169,7 +218,7 @@ static double sq_w[SQ_MAX_MODELS][SQ_MAX_N];
 static int32_t sq_models = 0;
 
 static const char sq_schema_str[] =
-    "{\"abi\":2,\"fields\":["
+    "{\"fields\":["
     "{\"name\":\"n\",\"kind\":\"scalar\",\"type\":\"i64\"},"
     "{\"name\":\"s\",\"kind\":\"scalar\",\"type\":\"f64\"},"
     "{\"name\":\"w\",\"kind\":\"array\",\"type\":\"f64\"}]}";
@@ -350,7 +399,7 @@ int32_t fx_hess(int32_t id, const double *x, const double *y, double obj_weight,
  * schema field is a table `pts` with columns i (i64, 1-based variable index)
  * and w (f64, weight). Exercises the consumers' table path end-to-end. */
 static const char tb_schema_str[] =
-    "{\"abi\":2,\"fields\":[{\"name\":\"pts\",\"kind\":\"table\",\"columns\":"
+    "{\"fields\":[{\"name\":\"pts\",\"kind\":\"table\",\"columns\":"
     "[{\"name\":\"i\",\"type\":\"i64\"},{\"name\":\"w\",\"type\":\"f64\"}]}]}";
 int32_t tb_schema(char *buf, int32_t cap) {
     int32_t len = (int32_t)(sizeof(tb_schema_str) - 1);
@@ -457,7 +506,7 @@ int32_t ns_data_begin(void) { return 1; }
 
 /* `bf`: schema + builder whose data_begin fails. */
 static const char bf_schema_str[] =
-    "{\"abi\":2,\"fields\":[{\"name\":\"n\",\"kind\":\"scalar\",\"type\":\"i64\"}]}";
+    "{\"fields\":[{\"name\":\"n\",\"kind\":\"scalar\",\"type\":\"i64\"}]}";
 int32_t bf_schema(char *buf, int32_t cap) {
     int32_t len = (int32_t)(sizeof(bf_schema_str) - 1);
     for (int32_t k = 0; k < cap && k < len; k++) buf[k] = bf_schema_str[k];
@@ -467,7 +516,7 @@ int32_t bf_data_begin(void) { return 0; }
 
 /* `nf`: the builder runs to the end and new_from_data fails. */
 static const char nf_schema_str[] =
-    "{\"abi\":2,\"fields\":[{\"name\":\"n\",\"kind\":\"scalar\",\"type\":\"i64\"}]}";
+    "{\"fields\":[{\"name\":\"n\",\"kind\":\"scalar\",\"type\":\"i64\"}]}";
 int32_t nf_schema(char *buf, int32_t cap) {
     int32_t len = (int32_t)(sizeof(nf_schema_str) - 1);
     for (int32_t k = 0; k < cap && k < len; k++) buf[k] = nf_schema_str[k];
