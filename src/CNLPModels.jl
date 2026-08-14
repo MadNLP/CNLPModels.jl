@@ -236,6 +236,9 @@ struct BlockRef
     index::Cint
 end
 
+Base.length(b::BlockRef) = b.length
+Base.size(b::BlockRef) = b.dims
+
 Base.show(io::IO, b::BlockRef) = print(
     io, "BlockRef(:", b.name, ", ", b.kind, ", ", join(b.dims, "×"),
     " at ", b.offset, ")")
@@ -247,6 +250,23 @@ Base.show(io::IO, b::BlockRef) = print(
 function _read_layout(lib::CLib, prefix::AbstractString, id::Cint)
     nb = Libdl.dlsym(lib.handle, Symbol(prefix, "_nblocks"); throw_error = false)
     nb === nothing && return ((;), (;), (;))
+    try
+        return _read_layout_strict(lib, prefix, id, nb)
+    catch err
+        # The layout is an OPTIONAL tier: a library whose block query fails
+        # is nonconformant, but that must not make the MODEL unusable — the
+        # evaluators are independent of it. Warn (once per construction, with
+        # the real error) and carry on with no named blocks. Observed live:
+        # a producer bug returned status 2 for six of seventeen models, and
+        # every one of them was thereby unconstructable rather than merely
+        # nameless.
+        @warn "reading the named-block layout of `$prefix` failed; the model
+               works, but get_vars/get_cons/get_pars will report no blocks" err
+        return ((;), (;), (;))
+    end
+end
+
+function _read_layout_strict(lib::CLib, prefix::AbstractString, id::Cint, nb::Ptr{Cvoid})
     n = ccall(nb, Cint, (Cint,), id)
     n < 0 && return ((;), (;), (;))
     bp = Libdl.dlsym(lib.handle, Symbol(prefix, "_block"))

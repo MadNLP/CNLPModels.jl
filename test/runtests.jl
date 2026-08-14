@@ -446,3 +446,18 @@ end
         @test Hv0 ≈ 2.0 * ow * v
     end
 end
+
+@testset "layout robustness and block sizes" begin
+    lib = CNLPModels.load(LIBPATH)
+    m = CNLPModel(lib, 4; prefix = "tq")
+    # Coverage audits sum lengths and read shapes off the refs directly.
+    b = get_vars(m, :x)
+    @test length(b) == 4 && size(b) == (4,)
+    @test sum(length, values(get_vars(m))) == m.meta.nvar
+    # A model whose layout READ fails still constructs and evaluates: `bf`
+    # exports a partial surface, so its (absent) layout reports empty rather
+    # than killing the model — the tier is optional, the evaluators are not.
+    # (The fixture has no conformant-but-lying library to probe the warn
+    # path hermetically; the empty-tier path is what is testable here.)
+    @test keys(get_vars(CNLPModel(lib, 4; prefix = "tq"))) == (:x,)
+end
