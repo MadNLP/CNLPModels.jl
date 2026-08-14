@@ -1,7 +1,7 @@
 name = "CNLPModels"
 uuid = "e8ddee8d-ce21-405b-9ec9-45cea2c1b284"
 authors = ["Sungho Shin <sushin@mit.edu>"]
-version = "0.2.0"
+version = "0.3.0"
 
 [deps]
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
