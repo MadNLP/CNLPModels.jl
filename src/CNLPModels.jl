@@ -65,7 +65,7 @@ using LinearAlgebra
 import NLPModels: NLPModels, AbstractNLPModel, NLPModelMeta, Counters,
     increment!, @lencheck
 
-export CNLPModel, restore_blas!, schema_json, set_path!, @cnlp_str,
+export CNLPModel, argtype, available_models, restore_blas!, schema_json, set_path!, @cnlp_str,
     get_vars, get_cons, get_pars, get_value, set_value!,
     solution, multipliers, multipliers_L, multipliers_U
 
@@ -200,6 +200,10 @@ struct CNLPModel <: AbstractNLPModel{Float64, Vector{Float64}}
     jrows::Vector{Int}
     jcols::Vector{Int}
     jbuf::Vector{Float64}
+    # cached Hessian structure + a value buffer, for hprod!
+    hrows::Vector{Int}
+    hcols::Vector{Int}
+    hbuf::Vector{Float64}
     # the model's NAMED blocks, read from the library at construction, and the
     # prefix they are addressed under (parameters are read and written through
     # it after the fact)
@@ -282,7 +286,11 @@ structured libraries only): a JSON description of the fields, kinds
 the schema is per model — name it as a symbol, exactly as in [`CNLPModel`](@ref).
 """
 function schema_json(lib::CLib; prefix::AbstractString = "rec")
-    fp = Libdl.dlsym(lib.handle, Symbol(prefix, "_schema"))
+    fp = Libdl.dlsym(lib.handle, Symbol(prefix, "_schema"); throw_error = false)
+    # A model with no structured schema is not an error to ask about: it takes
+    # one value or none, and `argtype` says which. Returning `nothing` lets a
+    # caller ask about any model uniformly.
+    fp === nothing && return nothing
     n = ccall(fp, Cint, (Ptr{UInt8}, Cint), C_NULL, Cint(0))
     buf = Vector{UInt8}(undef, Int(n))
     ccall(fp, Cint, (Ptr{UInt8}, Cint), buf, n)
@@ -497,9 +505,12 @@ function CNLPModel(
         fp(:jac_structure), fp(:jac), fp(:hess_structure), fp(:hess),
         Vector{Int}(undef, nnzj), Vector{Int}(undef, nnzj),
         Vector{Float64}(undef, nnzj),
+        Vector{Int}(undef, nnzh), Vector{Int}(undef, nnzh),
+        Vector{Float64}(undef, nnzh),
         String(prefix), vars, cons, pars,
     )
     NLPModels.jac_structure!(m, m.jrows, m.jcols)
+    NLPModels.hess_structure!(m, m.hrows, m.hcols)
     return m
 end
 
@@ -616,6 +627,72 @@ end
 _resolve_spec(spec::AbstractString) =
     _is_name(spec) ? lib(spec[2:end]) :
     get!(() -> load(_resolve_path(spec)), _LIBS, abspath(spec))
+
+"""
+    argtype(lib, model) -> String
+
+What a model instantiates **from**: the types its entry point takes, in order,
+each optionally followed by `|` and a description.
+
+This is the question a consumer holding only a library cannot otherwise answer.
+`""` is a model that takes nothing, `"int|size"` one that takes a size,
+`"string|…"` one whose entry point takes a string, and a longer list is a
+structured model taking one value per field:
+
+    argtype(lib, :acopf)   # "int|arg1,Vector{f64}|v0,Table{i::int pd::f64}|bus"
+
+Every model answers, including those with no builder schema — which is why
+this exists rather than reading the schema, which only structured models have.
+A library that publishes no signature returns `""`.
+"""
+argtype(lib::CLib, model::Union{Symbol, AbstractString}) = _argtype(lib, String(model))
+argtype(spec::AbstractString, model::Union{Symbol, AbstractString}) =
+    _argtype(_resolve_spec(spec), String(model))
+
+function _argtype(lib::CLib, prefix::AbstractString)
+    fp = Libdl.dlsym(lib.handle, Symbol(prefix, "_argtype"); throw_error = false)
+    fp === nothing && return ""
+    n = ccall(fp, Cint, (Ptr{UInt8}, Cint), C_NULL, Cint(0))
+    n <= 0 && return ""
+    buf = Vector{UInt8}(undef, Int(n))
+    ccall(fp, Cint, (Ptr{UInt8}, Cint), buf, n)
+    return String(buf)
+end
+
+"""
+    available_models(lib) -> Vector{Symbol}
+
+The models a library carries, by name.
+
+Every other entry point needs a prefix to start from; this is the one question
+a caller can ask having only a path. Pair it with [`CNLPModel`](@ref):
+
+    for name in available_models("@grid")
+        m = CNLPModel("@grid", name, data)
+    end
+
+A library that does not publish a catalogue — a hand-written C library, or one
+compiled before libraries said what they carried — returns an empty vector, and
+selecting a model by name still works if you know the name.
+"""
+available_models(lib::CLib) = _catalogue(lib)
+available_models(spec::AbstractString) = _catalogue(_resolve_spec(spec))
+
+function _catalogue(lib::CLib)
+    n = Libdl.dlsym(lib.handle, :cnlp_nmodels; throw_error = false)
+    n === nothing && return Symbol[]
+    count = ccall(n, Cint, ())
+    count <= 0 && return Symbol[]
+    np = Libdl.dlsym(lib.handle, :cnlp_model_name)
+    out = Vector{Symbol}(undef, Int(count))
+    for k in 0:(Int(count) - 1)
+        need = ccall(np, Cint, (Cint, Ptr{UInt8}, Cint), Cint(k), C_NULL, Cint(0))
+        buf = Vector{UInt8}(undef, Int(need))
+        ccall(np, Cint, (Cint, Ptr{UInt8}, Cint), Cint(k), buf, need)
+        out[k + 1] = Symbol(String(buf))
+    end
+    return out
+end
 
 # ── Named blocks ─────────────────────────────────────────────────────────────
 
@@ -843,6 +920,52 @@ function NLPModels.hess_coord!(
     obj_weight::Real = 1.0,
 )
     return NLPModels.hess_coord!(m, x, zeros(m.meta.ncon), vals; obj_weight = obj_weight)
+end
+
+# All constraints are nonlinear here — the ABI draws no linear/nonlinear
+# distinction — so the _nln spellings some solver code paths call are the
+# plain ones.
+function NLPModels.cons_nln!(
+    m::CNLPModel, x::AbstractVector{Float64}, c::AbstractVector{Float64},
+)
+    @lencheck m.meta.nvar x
+    @lencheck m.meta.ncon c
+    increment!(m, :neval_cons_nln)
+    _check(ccall(m.cons_p, Cint, (Cint, Ptr{Cdouble}, Ptr{Cdouble}), m.id, x, c), :cons)
+    return c
+end
+
+# Hessian-vector product, assembled from the COO Hessian the ABI provides:
+# one `P_hess` evaluation into the cached buffer, then a symmetric matvec
+# over the lower triangle (off-diagonal entries contribute both ways). This
+# is what lets matrix-free solvers run against a compiled model at all; a
+# library wanting true matrix-free products is a future ABI addition, and
+# this stays the fallback for libraries without one.
+function NLPModels.hprod!(
+    m::CNLPModel, x::AbstractVector{Float64}, y::AbstractVector{Float64},
+    v::AbstractVector{Float64}, Hv::AbstractVector{Float64};
+    obj_weight::Real = 1.0,
+)
+    @lencheck m.meta.nvar x v Hv
+    @lencheck m.meta.ncon y
+    increment!(m, :neval_hprod)
+    _check(ccall(m.hess_p, Cint,
+        (Cint, Ptr{Cdouble}, Ptr{Cdouble}, Cdouble, Ptr{Cdouble}),
+        m.id, x, y, Cdouble(obj_weight), m.hbuf), :hess)
+    fill!(Hv, 0.0)
+    @inbounds for k in eachindex(m.hbuf)
+        i, j, h = m.hrows[k], m.hcols[k], m.hbuf[k]
+        Hv[i] += h * v[j]
+        i == j || (Hv[j] += h * v[i])
+    end
+    return Hv
+end
+
+function NLPModels.hprod!(
+    m::CNLPModel, x::AbstractVector{Float64}, v::AbstractVector{Float64},
+    Hv::AbstractVector{Float64}; obj_weight::Real = 1.0,
+)
+    return NLPModels.hprod!(m, x, zeros(m.meta.ncon), v, Hv; obj_weight = obj_weight)
 end
 
 end # module CNLPModels

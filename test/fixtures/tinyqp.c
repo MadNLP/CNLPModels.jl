@@ -76,6 +76,26 @@ static int32_t getN(int32_t id) {
     return (id >= 1 && id <= n_models) ? Ns[id - 1] : -1;
 }
 
+/* ── What this library carries ─────────────────────────────────────────────
+ * Library-level, not per-model: a consumer holding only a path has no prefix
+ * to start from, so these two have fixed names. Optional, like the layout and
+ * builder surfaces — a library that omits them is consumed exactly as before.
+ */
+/* The four complete models. The other prefixes in this file (bf, ns, nf, zz)
+ * implement partial surfaces on purpose, to exercise failure paths — a
+ * catalogue naming them would be advertising models that cannot be built. */
+int32_t cnlp_nmodels(void) { return 4; }
+
+int32_t cnlp_model_name(int32_t k, uint8_t *buf, int32_t cap) {
+    static const char *names[4] = {"tq", "sq", "fx", "tb"};
+    if (k < 0 || k >= 4) return -1;
+    const char *nm = names[k];
+    int32_t len = 0;
+    while (nm[len]) len++;
+    for (int32_t i = 0; i < cap && i < len; i++) buf[i] = (uint8_t)nm[i];
+    return len;
+}
+
 /* ── Named blocks ─────────────────────────────────────────────────────────
  * The layout surface a compiled ExaModels library publishes: which named
  * variable, constraint and parameter blocks the model has, and where each one

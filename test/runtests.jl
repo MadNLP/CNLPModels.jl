@@ -385,3 +385,37 @@ end
     @test_throws "publishes no named blocks" get_vars(ms, :x)
     @test ms.meta.nvar == 4
 end
+
+@testset "discoverability" begin
+    lib = CNLPModels.load(LIBPATH)
+    # The catalogue answers the one question a caller with only a path has.
+    @test available_models(lib) == [:tq, :sq, :fx, :tb]
+    # Argument signatures: every model answers, schema or not. The fixture
+    # publishes none, so the honest answer is the empty string —
+    @test argtype(lib, :tq) == ""
+    # — and schema is an answer, not a throw, for models without one.
+    @test schema_json(lib; prefix = "fx") === nothing
+    @test schema_json(lib; prefix = "tq") isa AbstractString   # tq has one
+end
+
+@testset "hprod and cons_nln" begin
+    lib = CNLPModels.load(LIBPATH)
+    m = CNLPModel(lib, 4; prefix = "tq")
+    x = [0.5, 0.25, 2.0, -1.0]
+    v = [1.0, -2.0, 3.0, 0.5]
+    y = [3.0]
+    # cons_nln! is cons! here: the ABI draws no linear distinction.
+    c1 = zeros(1); c2 = zeros(1)
+    NLPModels.cons!(m, x, c1); NLPModels.cons_nln!(m, x, c2)
+    @test c1 == c2
+    # hprod against the assembled dense Hessian — the definition, not the
+    # implementation: tq's Hessian is 2*obj_weight*I, so both legs are exact.
+    for ow in (1.0, 0.7)
+        Hv = zeros(4)
+        NLPModels.hprod!(m, x, y, v, Hv; obj_weight = ow)
+        @test Hv ≈ 2.0 * ow * v
+        Hv0 = zeros(4)
+        NLPModels.hprod!(m, x, v, Hv0; obj_weight = ow)   # y-less form
+        @test Hv0 ≈ 2.0 * ow * v
+    end
+end

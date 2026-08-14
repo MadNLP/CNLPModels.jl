@@ -161,6 +161,13 @@ compiled from a recipe names its fields `arg1`, `arg2`, ... for that reason.
    `tq_` (instantiated from one integer), `sq_` (no one-integer constructor —
    built from a three-field schema through the builder), `fx_` (no
    instantiation data at all) and `tb_` (a table field).
+5. Publish only what a library of any origin can honestly answer: names, sizes,
+   offsets, dimensions, argument types, descriptions. This interface is a
+   generic abstraction over "an NLP behind a C boundary", and it deliberately
+   stops short of a model's algebraic structure — an expression tree is a
+   particular modelling package's representation, not something a hand-written
+   library could produce, and asking for one would make this that package's
+   interface in C clothing rather than an interface anyone can implement.
 
 ## Notes for libraries carrying their own runtime
 
