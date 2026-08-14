@@ -529,6 +529,13 @@ function CNLPModel(
     )
     NLPModels.jac_structure!(m, m.jrows, m.jcols)
     NLPModels.hess_structure!(m, m.hrows, m.hcols)
+    # Restore once more on the way out: the structure calls above are the
+    # first entries into THIS model's generated code, and in a multi-model
+    # library a later model's first calls can lazily clobber the trampoline
+    # again after the post-instantiation restore. Observed live: model two of
+    # an OPF library printing `no BLAS/LAPACK library loaded for dcopy_()`
+    # at solve time until an explicit restore.
+    restore_blas!(lib)
     return m
 end
 
@@ -735,6 +742,10 @@ empty tuples, and everything else about it still works.
     m = CNLPModel("@grid", :acopf, bus)
     keys(get_vars(m))                 # (:pg, :qg, :vm, :va)
     solution(result, get_vars(m, :pg))
+
+Modelling packages export accessors with these names too (ExaModels itself
+does); with both loaded, Julia makes the bare name ambiguous — qualify as
+`CNLPModels.get_vars`.
 """
 get_vars(m::CNLPModel) = getfield(m, :vars)
 
@@ -779,6 +790,12 @@ block's own dimensions.
 solution(result, b::BlockRef) =
     reshape(view(result.solution, (b.offset + 1):(b.offset + b.length)), b.dims...)
 
+# The same extraction from a bare vector — for callers holding `res.solution`
+# rather than the result object; without this method that spelling failed
+# with a `FieldError` pointing at Array, which explains nothing.
+solution(x::AbstractVector, b::BlockRef) =
+    reshape(view(x, (b.offset + 1):(b.offset + b.length)), b.dims...)
+
 """
     multipliers(result, block)
 
@@ -786,6 +803,10 @@ The dual variables for constraint `block`.
 """
 multipliers(result, b::BlockRef) =
     reshape(view(result.multipliers, (b.offset + 1):(b.offset + b.length)), b.dims...)
+
+@doc (@doc solution)
+multipliers(y::AbstractVector, b::BlockRef) =
+    reshape(view(y, (b.offset + 1):(b.offset + b.length)), b.dims...)
 
 """
     multipliers_L(result, block)
@@ -796,9 +817,17 @@ The lower- and upper-bound dual variables for variable `block`.
 multipliers_L(result, b::BlockRef) =
     reshape(view(result.multipliers_L, (b.offset + 1):(b.offset + b.length)), b.dims...)
 
+@doc (@doc solution)
+multipliers_L(z::AbstractVector, b::BlockRef) =
+    reshape(view(z, (b.offset + 1):(b.offset + b.length)), b.dims...)
+
 @doc (@doc multipliers_L)
 multipliers_U(result, b::BlockRef) =
     reshape(view(result.multipliers_U, (b.offset + 1):(b.offset + b.length)), b.dims...)
+
+@doc (@doc solution)
+multipliers_U(z::AbstractVector, b::BlockRef) =
+    reshape(view(z, (b.offset + 1):(b.offset + b.length)), b.dims...)
 
 """
     get_value(model, param)

@@ -363,6 +363,10 @@ end
     res = (solution = [1.0, 2.0, 3.0, 4.0], multipliers = [7.0],
            multipliers_L = [0.1, 0.2, 0.3, 0.4], multipliers_U = [0.5, 0.6, 0.7, 0.8])
     @test solution(res, b) == [1.0, 2.0, 3.0, 4.0]
+    # The bare-vector spelling extracts too — `res.solution` in hand is as
+    # natural as the result object, and used to fail with a bare FieldError.
+    @test solution(res.solution, b) == [1.0, 2.0, 3.0, 4.0]
+    @test multipliers_L(res.multipliers_L, b) == [0.1, 0.2, 0.3, 0.4]
     @test multipliers(res, get_cons(m, :budget)) == [7.0]
     @test multipliers_L(res, b) == [0.1, 0.2, 0.3, 0.4]
     @test multipliers_U(res, b) == [0.5, 0.6, 0.7, 0.8]
