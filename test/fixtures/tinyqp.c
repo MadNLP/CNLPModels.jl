@@ -12,6 +12,46 @@
 #include <stdint.h>
 #include <math.h>
 
+/* ── cnlp v0.1 conformance ─────────────────────────────────────────────────
+ * The spec header is vendored beside this file (byte-identical to cnlp.h at
+ * the cnlp-abi v0.1 tag); expanding the declarations makes any signature
+ * drift between this fixture and the spec a COMPILE error in the suites.
+ * sq and tb are builder-only by design (no P_new), so only their builder
+ * tier is macro-checked; the partial prefixes (bf, ns, nf, zz) exercise
+ * failure paths and are deliberately not conformant models.
+ */
+#include "cnlp.h"
+CNLP_DECLARE_MODEL(tq)
+CNLP_DECLARE_BUILDER(tq)
+CNLP_DECLARE_LAYOUT(tq)
+CNLP_DECLARE_MODEL(fx)
+CNLP_DECLARE_BUILDER(sq)
+CNLP_DECLARE_BUILDER(tb)
+
+/* What each complete model instantiates from (P_argtype, v0.1): comma-
+ * separated types, `type|description`, mirroring each schema. */
+static int32_t put_str(const char *s, uint8_t *buf, int32_t cap) {
+    int32_t len = 0;
+    while (s[len]) len++;
+    for (int32_t i = 0; i < cap && i < len; i++) buf[i] = (uint8_t)s[i];
+    return len;
+}
+int32_t tq_nargs(void) { return 1; }
+int32_t tq_argtype(uint8_t *buf, int32_t cap) {
+    return put_str("int|size", buf, cap);
+}
+int32_t sq_nargs(void) { return 3; }
+int32_t sq_argtype(uint8_t *buf, int32_t cap) {
+    return put_str("int|n,f64|s,Vector{f64}|w", buf, cap);
+}
+int32_t fx_argtype(uint8_t *buf, int32_t cap) {
+    return put_str("", buf, cap);
+}
+int32_t tb_nargs(void) { return 1; }
+int32_t tb_argtype(uint8_t *buf, int32_t cap) {
+    return put_str("Table{i::int w::f64}|pts", buf, cap);
+}
+
 #define TQ_MAX_MODELS 64
 static int32_t Ns[TQ_MAX_MODELS];
 static int32_t n_models = 0;
@@ -31,9 +71,9 @@ static const char tq_schema_str[] =
     "{\"fields\":[{\"name\":\"n\",\"kind\":\"scalar\",\"type\":\"i64\"}]}";
 
 /* Fills buf (up to cap bytes) and returns the schema's full length. */
-int32_t tq_schema(char *buf, int32_t cap) {
+int32_t tq_schema(uint8_t *buf, int32_t cap) {
     int32_t len = (int32_t)(sizeof(tq_schema_str) - 1);
-    for (int32_t i = 0; i < cap && i < len; i++) buf[i] = tq_schema_str[i];
+    for (int32_t i = 0; i < cap && i < len; i++) buf[i] = (uint8_t)tq_schema_str[i];
     return len;
 }
 
@@ -243,9 +283,9 @@ static const char sq_schema_str[] =
     "{\"name\":\"s\",\"kind\":\"scalar\",\"type\":\"f64\"},"
     "{\"name\":\"w\",\"kind\":\"array\",\"type\":\"f64\"}]}";
 
-int32_t sq_schema(char *buf, int32_t cap) {
+int32_t sq_schema(uint8_t *buf, int32_t cap) {
     int32_t len = (int32_t)(sizeof(sq_schema_str) - 1);
-    for (int32_t i = 0; i < cap && i < len; i++) buf[i] = sq_schema_str[i];
+    for (int32_t i = 0; i < cap && i < len; i++) buf[i] = (uint8_t)sq_schema_str[i];
     return len;
 }
 
@@ -421,9 +461,9 @@ int32_t fx_hess(int32_t id, const double *x, const double *y, double obj_weight,
 static const char tb_schema_str[] =
     "{\"fields\":[{\"name\":\"pts\",\"kind\":\"table\",\"columns\":"
     "[{\"name\":\"i\",\"type\":\"i64\"},{\"name\":\"w\",\"type\":\"f64\"}]}]}";
-int32_t tb_schema(char *buf, int32_t cap) {
+int32_t tb_schema(uint8_t *buf, int32_t cap) {
     int32_t len = (int32_t)(sizeof(tb_schema_str) - 1);
-    for (int32_t k = 0; k < cap && k < len; k++) buf[k] = tb_schema_str[k];
+    for (int32_t k = 0; k < cap && k < len; k++) buf[k] = (uint8_t)tb_schema_str[k];
     return len;
 }
 #define TB_MAX 8

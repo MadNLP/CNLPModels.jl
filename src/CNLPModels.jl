@@ -7,6 +7,9 @@ Ipopt, ...) can solve it. The main producer of such libraries is ExaModels'
 tape recorder (`compile_library`), but any
 library implementing the ABI below works, in any language.
 
+Implements cnlp ABI v0.1 (normative spec: `cnlp.h` at
+https://github.com/madsuite-org/cnlp-abi, tag v0.1).
+
 # C ABI convention
 
 For a chosen symbol `prefix` (e.g. `rec`), the library exposes — all indices

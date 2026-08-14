@@ -56,9 +56,11 @@ to the library name, so a one-model library needs nothing new.
 
 ## The C ABI
 
-The normative specification is [`cnlp.h` in madsuite-org/cnlp-abi](https://github.com/madsuite-org/cnlp-abi)
-— the header is the spec. The summary below is informative; where they
-disagree, the header wins.
+This package implements **cnlp ABI v0.1**; the normative specification is
+[`cnlp.h` at the v0.1 tag](https://github.com/madsuite-org/cnlp-abi/blob/v0.1/cnlp.h) — the header is the spec, and a
+byte-identical copy is vendored at `test/fixtures/cnlp.h`, where the fixture
+expands its declarations so signature drift fails compilation. The summary
+below is informative; where they disagree, the header wins.
 
 For a chosen symbol prefix `P` (default `"rec"`; the name-based loader
 defaults it to the library name, and a model named as a symbol supplies it

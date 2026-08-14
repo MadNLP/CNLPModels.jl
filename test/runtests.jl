@@ -390,9 +390,15 @@ end
     lib = CNLPModels.load(LIBPATH)
     # The catalogue answers the one question a caller with only a path has.
     @test available_models(lib) == [:tq, :sq, :fx, :tb]
-    # Argument signatures: every model answers, schema or not. The fixture
-    # publishes none, so the honest answer is the empty string —
-    @test argtype(lib, :tq) == ""
+    # Argument signatures (cnlp v0.1): every complete model publishes what
+    # it instantiates from, mirroring its schema; a fixed model answers "".
+    @test argtype(lib, :tq) == "int|size"
+    @test argtype(lib, :sq) == "int|n,f64|s,Vector{f64}|w"
+    @test argtype(lib, :tb) == "Table{i::int w::f64}|pts"
+    @test argtype(lib, :fx) == ""
+    # A prefix with no published signature still answers "" — degradation,
+    # not an error (bf is a deliberately partial stub).
+    @test argtype(lib, :bf) == ""
     # — and schema is an answer, not a throw, for models without one.
     @test schema_json(lib; prefix = "fx") === nothing
     @test schema_json(lib; prefix = "tq") isa AbstractString   # tq has one
