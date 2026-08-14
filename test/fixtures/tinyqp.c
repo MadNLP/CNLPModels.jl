@@ -27,6 +27,8 @@ CNLP_DECLARE_LAYOUT(tq)
 CNLP_DECLARE_MODEL(fx)
 CNLP_DECLARE_BUILDER(sq)
 CNLP_DECLARE_BUILDER(tb)
+CNLP_DECLARE_MODEL(ps)
+CNLP_DECLARE_NEW_STR(ps)
 
 /* What each complete model instantiates from (P_argtype, v0.1): comma-
  * separated types, `type|description`, mirroring each schema. */
@@ -53,6 +55,92 @@ int32_t tb_argtype(uint8_t *buf, int32_t cap) {
 }
 
 #define TQ_MAX_MODELS 64
+/* ── ps: instantiated from one STRING (cnlp P_new_str) ─────────────────────
+ * The string stands in for a case-file path: here it simply carries the size
+ * in decimal, so the consumers' string routing is testable hermetically.
+ * min sum (x_i - 2)^2, unconstrained; f(x*) = 0 at x = 2. */
+static int32_t ps_sizes[TQ_MAX_MODELS];
+static int32_t ps_count = 0;
+static int32_t ps_ok(int32_t id) { return id >= 1 && id <= ps_count; }
+
+int32_t ps_nargs(void) { return 1; }
+int32_t ps_argtype(uint8_t *buf, int32_t cap) {
+    return put_str("string|size, in decimal", buf, cap);
+}
+
+int32_t ps_new_str(const char *s) {
+    int32_t n = 0;
+    if (!s || !*s) return 0;
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9') return 0;
+        n = 10 * n + (*s - '0');
+    }
+    if (n < 1 || ps_count >= TQ_MAX_MODELS) return 0;
+    ps_sizes[ps_count++] = n;
+    return ps_count;
+}
+
+int32_t ps_nvar(int32_t id) { return ps_ok(id) ? ps_sizes[id - 1] : -1; }
+int32_t ps_ncon(int32_t id) { return ps_ok(id) ? 0 : -1; }
+int32_t ps_nnzj(int32_t id) { return ps_ok(id) ? 0 : -1; }
+int32_t ps_nnzh(int32_t id) { return ps_ok(id) ? ps_sizes[id - 1] : -1; }
+
+int32_t ps_meta(int32_t id, double *x0, double *lvar, double *uvar,
+                double *lcon, double *ucon) {
+    (void)lcon; (void)ucon;
+    if (!ps_ok(id)) return 1;
+    for (int32_t i = 0; i < ps_sizes[id - 1]; i++) {
+        x0[i] = 0.0; lvar[i] = -INFINITY; uvar[i] = INFINITY;
+    }
+    return 0;
+}
+
+int32_t ps_obj(int32_t id, const double *x, double *out) {
+    if (!ps_ok(id)) return 1;
+    double f = 0.0;
+    for (int32_t i = 0; i < ps_sizes[id - 1]; i++)
+        f += (x[i] - 2.0) * (x[i] - 2.0);
+    *out = f;
+    return 0;
+}
+
+int32_t ps_grad(int32_t id, const double *x, double *g) {
+    if (!ps_ok(id)) return 1;
+    for (int32_t i = 0; i < ps_sizes[id - 1]; i++) g[i] = 2.0 * (x[i] - 2.0);
+    return 0;
+}
+
+int32_t ps_cons(int32_t id, const double *x, double *c) {
+    (void)x; (void)c;
+    return ps_ok(id) ? 0 : 1;
+}
+
+int32_t ps_jac_structure(int32_t id, int32_t *rows, int32_t *cols) {
+    (void)rows; (void)cols;
+    return ps_ok(id) ? 0 : 1;
+}
+
+int32_t ps_jac(int32_t id, const double *x, double *vals) {
+    (void)x; (void)vals;
+    return ps_ok(id) ? 0 : 1;
+}
+
+int32_t ps_hess_structure(int32_t id, int32_t *rows, int32_t *cols) {
+    if (!ps_ok(id)) return 1;
+    for (int32_t i = 0; i < ps_sizes[id - 1]; i++) {
+        rows[i] = i + 1; cols[i] = i + 1;
+    }
+    return 0;
+}
+
+int32_t ps_hess(int32_t id, const double *x, const double *y,
+                double obj_weight, double *vals) {
+    (void)x; (void)y;
+    if (!ps_ok(id)) return 1;
+    for (int32_t i = 0; i < ps_sizes[id - 1]; i++) vals[i] = 2.0 * obj_weight;
+    return 0;
+}
+
 static int32_t Ns[TQ_MAX_MODELS];
 static int32_t n_models = 0;
 
@@ -124,11 +212,11 @@ static int32_t getN(int32_t id) {
 /* The four complete models. The other prefixes in this file (bf, ns, nf, zz)
  * implement partial surfaces on purpose, to exercise failure paths — a
  * catalogue naming them would be advertising models that cannot be built. */
-int32_t cnlp_nmodels(void) { return 4; }
+int32_t cnlp_nmodels(void) { return 5; }
 
 int32_t cnlp_model_name(int32_t k, uint8_t *buf, int32_t cap) {
-    static const char *names[4] = {"tq", "sq", "fx", "tb"};
-    if (k < 0 || k >= 4) return -1;
+    static const char *names[5] = {"tq", "sq", "fx", "tb", "ps"};
+    if (k < 0 || k >= 5) return -1;
     const char *nm = names[k];
     int32_t len = 0;
     while (nm[len]) len++;

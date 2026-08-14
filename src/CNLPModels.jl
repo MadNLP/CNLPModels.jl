@@ -355,6 +355,21 @@ end
 # schema is a single integer scalar.
 
 function _instantiate(lib::CLib, prefix::AbstractString, args::Tuple)
+    # A lone STRING argument goes to `<prefix>_new_str` — the entry point for
+    # models whose one argument is a string (a case-file path, say). There is
+    # no ambiguity with model SELECTION: by the time `_instantiate` runs, a
+    # leading selector string has already been consumed, so a string here is
+    # an argument. `argtype` is the witness a caller consults; the symbol is
+    # the witness this routing probes.
+    if length(args) == 1 && args[1] isa AbstractString
+        p = Libdl.dlsym(lib.handle, Symbol(prefix, "_new_str"); throw_error = false)
+        p === nothing && error(
+            "`$prefix` has no string entry point (`$(prefix)_new_str`); its " *
+            "signature is `" * _argtype(lib, prefix) * "`")
+        id = ccall(p, Cint, (Cstring,), String(args[1]))
+        id > 0 || _status_error(Symbol(prefix, "_new_str"), id)
+        return id
+    end
     if length(args) == 1 && args[1] isa Integer
         p = Libdl.dlsym(lib.handle, Symbol(prefix, "_new"); throw_error = false)
         if p !== nothing

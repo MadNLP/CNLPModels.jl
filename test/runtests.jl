@@ -389,19 +389,36 @@ end
 @testset "discoverability" begin
     lib = CNLPModels.load(LIBPATH)
     # The catalogue answers the one question a caller with only a path has.
-    @test available_models(lib) == [:tq, :sq, :fx, :tb]
+    @test available_models(lib) == [:tq, :sq, :fx, :tb, :ps]
     # Argument signatures (cnlp v0.1): every complete model publishes what
     # it instantiates from, mirroring its schema; a fixed model answers "".
     @test argtype(lib, :tq) == "int|size"
     @test argtype(lib, :sq) == "int|n,f64|s,Vector{f64}|w"
     @test argtype(lib, :tb) == "Table{i::int w::f64}|pts"
     @test argtype(lib, :fx) == ""
+    @test argtype(lib, :ps) == "string|size, in decimal"
     # A prefix with no published signature still answers "" — degradation,
     # not an error (bf is a deliberately partial stub).
     @test argtype(lib, :bf) == ""
     # — and schema is an answer, not a throw, for models without one.
     @test schema_json(lib; prefix = "fx") === nothing
     @test schema_json(lib; prefix = "tq") isa AbstractString   # tq has one
+end
+
+@testset "string instantiation" begin
+    lib = CNLPModels.load(LIBPATH)
+    # A lone string argument routes to `<prefix>_new_str` — the entry point
+    # `argtype` announces with a lone "string" — exactly as a lone integer
+    # routes to `<prefix>_new`.
+    m = CNLPModel(lib, "5"; prefix = "ps")
+    @test m.meta.nvar == 5
+    @test NLPModels.obj(m, zeros(5)) == 4.0 * 5     # sum (0-2)^2
+    # A model without the string entry point refuses with its signature, so
+    # the caller learns what the model DOES take.
+    err = try CNLPModel(lib, "5"; prefix = "tq"); nothing catch e; sprint(showerror, e) end
+    @test occursin("no string entry point", err) && occursin("int|size", err)
+    # The library's own failure (an unparsable string) surfaces as a status.
+    @test_throws "ps_new_str" CNLPModel(lib, "not-a-number"; prefix = "ps")
 end
 
 @testset "hprod and cons_nln" begin
