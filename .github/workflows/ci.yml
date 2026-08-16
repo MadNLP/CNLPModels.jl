@@ -29,3 +29,6 @@ jobs:
           # Org-level token, not OIDC: OIDC uploads broke on the org transfer
           # (\"Repository not found\") while token uploads kept working.
           token: ${{ secrets.CODECOV_TOKEN }}
+          # The org-wide token cannot imply a repository; the slug says
+          # which repo this upload is for.
+          slug: ${{ github.repository }}
